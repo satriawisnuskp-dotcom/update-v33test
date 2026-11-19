@@ -1,0 +1,409 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile and cloud synchronization metadata.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "displayName": { "type": "string", "description": "Google display name" },
+        "email": { "type": "string", "description": "Google account email" },
+        "photoUrl": { "type": "string", "description": "Google profile photo URL" },
+        "lastSyncedAt": { "type": "integer", "description": "Last successful cloud sync epoch millis" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation (FieldValue.serverTimestamp())" },
+        "updatedAt": { "type": "integer", "description": "Client update epoch millis for LWW" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update (FieldValue.serverTimestamp())" }
+      },
+      "required": ["uid", "createdAt", "updatedAt"]
+    },
+    "SyncTransaction": {
+      "title": "SyncTransaction",
+      "description": "Financial transaction synced between Room and Firestore with soft delete and LWW timestamp.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "UUID document identifier" },
+        "title": { "type": "string", "description": "Transaction title" },
+        "type": { "type": "string", "enum": ["EXPENSE", "INCOME", "TRANSFER"] },
+        "amount": { "type": "number" },
+        "categoryId": { "type": "string" },
+        "subcategory": { "type": "string" },
+        "accountId": { "type": "string" },
+        "accountName": { "type": "string" },
+        "toAccountId": { "type": "string" },
+        "toAccountName": { "type": "string" },
+        "note": { "type": "string" },
+        "label": { "type": "string" },
+        "recurrence": { "type": "string" },
+        "date": { "type": "integer", "description": "Transaction date in epoch millis" },
+        "dayOfMonth": { "type": "integer" },
+        "monthIndex": { "type": "integer" },
+        "year": { "type": "integer" },
+        "dayOfWeekName": { "type": "string" },
+        "time": { "type": "string" },
+        "transferFee": { "type": "number" },
+        "targetAssetId": { "type": "string" },
+        "targetAssetName": { "type": "string" },
+        "targetDebtId": { "type": "string" },
+        "targetDebtName": { "type": "string" },
+        "updatedAt": { "type": "integer", "description": "Last-Write-Wins epoch millis" },
+        "isDeleted": { "type": "boolean" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time", "description": "FieldValue.serverTimestamp()" }
+      },
+      "required": ["id", "type", "amount", "categoryId", "accountId", "date", "updatedAt", "isDeleted"]
+    },
+    "SyncAccount": {
+      "title": "SyncAccount",
+      "description": "Wallet / bank account synced across devices.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "initialBalance": { "type": "number" },
+        "currentBalance": { "type": "number" },
+        "icon": { "type": "string" },
+        "color": { "type": "integer" },
+        "currency": { "type": "string" },
+        "lastCategory": { "type": "string" },
+        "lastAmount": { "type": "number" },
+        "lastActivityTime": { "type": "string" },
+        "excludeFromNetWorth": { "type": "boolean" },
+        "excludeFromBudget": { "type": "boolean" },
+        "sortOrder": { "type": "integer" },
+        "updatedAt": { "type": "integer" },
+        "isDeleted": { "type": "boolean" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "type", "initialBalance", "currentBalance", "icon", "color", "updatedAt", "isDeleted"]
+    },
+    "SyncCategory": {
+      "title": "SyncCategory",
+      "description": "Transaction category and subcategories synced across devices.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "type": "string", "enum": ["EXPENSE", "INCOME", "TRANSFER"] },
+        "icon": { "type": "string" },
+        "color": { "type": "integer" },
+        "isVisible": { "type": "boolean" },
+        "subcategoriesJson": { "type": "string" },
+        "sortOrder": { "type": "integer" },
+        "updatedAt": { "type": "integer" },
+        "isDeleted": { "type": "boolean" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "type", "icon", "color", "updatedAt", "isDeleted"]
+    },
+    "SyncDebt": {
+      "title": "SyncDebt",
+      "description": "Debt or receivable record synced across devices.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "personName": { "type": "string" },
+        "amount": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "type": { "type": "string", "enum": ["BORROWED", "LENT"] },
+        "dueDate": { "type": "string" },
+        "isPaid": { "type": "boolean" },
+        "startDate": { "type": "string" },
+        "startTime": { "type": "string" },
+        "monthlyPayment": { "type": "number" },
+        "interestRate": { "type": "number" },
+        "extraFees": { "type": "number" },
+        "categoryIcon": { "type": "string" },
+        "institutionLogo": { "type": "string" },
+        "tenureMonths": { "type": "integer" },
+        "linkedWalletName": { "type": "string" },
+        "recordsJson": { "type": "string" },
+        "sortOrder": { "type": "integer" },
+        "updatedAt": { "type": "integer" },
+        "isDeleted": { "type": "boolean" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "personName", "amount", "type", "dueDate", "isPaid", "updatedAt", "isDeleted"]
+    },
+    "SyncAsset": {
+      "title": "SyncAsset",
+      "description": "Investment or savings asset synced across devices.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "groupName": { "type": "string" },
+        "assetType": { "type": "string" },
+        "value": { "type": "number" },
+        "platform": { "type": "string" },
+        "performancePercent": { "type": "number" },
+        "currency": { "type": "string" },
+        "createdAtDate": { "type": "string" },
+        "createdAtTime": { "type": "string" },
+        "valuationMethod": { "type": "string" },
+        "recordsJson": { "type": "string" },
+        "iconUri": { "type": "string" },
+        "tickerSymbol": { "type": "string" },
+        "lotCount": { "type": "number" },
+        "averagePrice": { "type": "number" },
+        "currentPrice": { "type": "number" },
+        "dailyPriceChange": { "type": "number" },
+        "dailyPriceChangePercent": { "type": "number" },
+        "lastPriceUpdate": { "type": "integer" },
+        "sortOrder": { "type": "integer" },
+        "updatedAt": { "type": "integer" },
+        "isDeleted": { "type": "boolean" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "groupName", "assetType", "value", "updatedAt", "isDeleted"]
+    },
+    "SyncLabel": {
+      "title": "SyncLabel",
+      "description": "Transaction label synced across devices.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "sortOrder": { "type": "integer" },
+        "updatedAt": { "type": "integer" },
+        "isDeleted": { "type": "boolean" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "updatedAt", "isDeleted"]
+    },
+    "SyncBudget": {
+      "title": "SyncBudget",
+      "description": "Budget allocation synced across devices.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "category": { "type": "string" },
+        "allocated": { "type": "number" },
+        "spent": { "type": "number" },
+        "name": { "type": "string" },
+        "categoriesJson": { "type": "string" },
+        "accountNamesJson": { "type": "string" },
+        "frequency": { "type": "string" },
+        "customStartDate": { "type": "string" },
+        "customEndDate": { "type": "string" },
+        "sortOrder": { "type": "integer" },
+        "updatedAt": { "type": "integer" },
+        "isDeleted": { "type": "boolean" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "category", "allocated", "updatedAt", "isDeleted"]
+    },
+    "SyncRecurring": {
+      "title": "SyncRecurring",
+      "description": "Recurring transaction / bill schedule synced across devices.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["EXPENSE", "INCOME", "TRANSFER"] },
+        "category": { "type": "string" },
+        "subcategory": { "type": "string" },
+        "accountName": { "type": "string" },
+        "dayOfMonth": { "type": "integer" },
+        "frequency": { "type": "string" },
+        "startDate": { "type": "string" },
+        "endDate": { "type": "string" },
+        "note": { "type": "string" },
+        "label": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "autoDeduct": { "type": "boolean" },
+        "lastProcessedMonthYear": { "type": "string" },
+        "endCondition": { "type": "string" },
+        "endAfterCount": { "type": "integer" },
+        "logoName": { "type": "string" },
+        "skippedCount": { "type": "integer" },
+        "snoozedUntilDate": { "type": "string" },
+        "lastSkippedDateLabel": { "type": "string" },
+        "reminderEnabled": { "type": "boolean" },
+        "reminderOptionsJson": { "type": "string" },
+        "sortOrder": { "type": "integer" },
+        "updatedAt": { "type": "integer" },
+        "isDeleted": { "type": "boolean" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "amount", "type", "category", "accountName", "updatedAt", "isDeleted"]
+    },
+    "SyncFinancialPlan": {
+      "title": "SyncFinancialPlan",
+      "description": "Monthly salary / financial allocation plan synced across devices.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "monthIndex": { "type": "integer" },
+        "year": { "type": "integer" },
+        "itemsJson": { "type": "string" },
+        "sortOrder": { "type": "integer" },
+        "updatedAt": { "type": "integer" },
+        "isDeleted": { "type": "boolean" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "monthIndex", "year", "itemsJson", "updatedAt", "isDeleted"]
+    },
+    "SyncEvent": {
+      "title": "SyncEvent",
+      "description": "Event / trip budget synced across devices.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "eventType": { "type": "string" },
+        "targetBudget": { "type": "number" },
+        "monthIndex": { "type": "integer" },
+        "year": { "type": "integer" },
+        "startDate": { "type": "string" },
+        "endDate": { "type": "string" },
+        "currency": { "type": "string" },
+        "iconName": { "type": "string" },
+        "colorHex": { "type": "integer" },
+        "note": { "type": "string" },
+        "plannedExpensesJson": { "type": "string" },
+        "isCompleted": { "type": "boolean" },
+        "sortOrder": { "type": "integer" },
+        "updatedAt": { "type": "integer" },
+        "isDeleted": { "type": "boolean" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "targetBudget", "updatedAt", "isDeleted"]
+    },
+    "SyncSavingsGoal": {
+      "title": "SyncSavingsGoal",
+      "description": "Savings goal and records synced across devices.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "targetAmount": { "type": "number" },
+        "currentAmount": { "type": "number" },
+        "targetDate": { "type": "string" },
+        "startDate": { "type": "string" },
+        "currency": { "type": "string" },
+        "iconName": { "type": "string" },
+        "note": { "type": "string" },
+        "colorHex": { "type": "integer" },
+        "isCompleted": { "type": "boolean" },
+        "recordsJson": { "type": "string" },
+        "sortOrder": { "type": "integer" },
+        "updatedAt": { "type": "integer" },
+        "isDeleted": { "type": "boolean" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "targetAmount", "currentAmount", "updatedAt", "isDeleted"]
+    },
+    "SyncTimelineScenario": {
+      "title": "SyncTimelineScenario",
+      "description": "Cashflow simulator scenario synced across devices.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "amount": { "type": "number" },
+        "isIncome": { "type": "boolean" },
+        "note": { "type": "string" },
+        "date": { "type": "string" },
+        "recurrence": { "type": "string" },
+        "sortOrder": { "type": "integer" },
+        "updatedAt": { "type": "integer" },
+        "isDeleted": { "type": "boolean" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "amount", "isIncome", "date", "updatedAt", "isDeleted"]
+    },
+    "SyncAppSettings": {
+      "title": "SyncAppSettings",
+      "description": "Full user settings, menu customization, dashboard/statistics order, and active plan state.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "settingsJson": { "type": "string" },
+        "activePlanId": { "type": "string" },
+        "planTitle": { "type": "string" },
+        "selectedWalletFilter": { "type": "string" },
+        "upcomingItemsJson": { "type": "string" },
+        "updatedAt": { "type": "integer" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "settingsJson", "updatedAt"]
+    },
+    "SyncCustomLogo": {
+      "title": "SyncCustomLogo",
+      "description": "Compressed custom icon image payload (Base64) for accounts, assets, and debts synced across devices.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fileName": { "type": "string" },
+        "base64Data": { "type": "string" },
+        "updatedAt": { "type": "integer" },
+        "isDeleted": { "type": "boolean" },
+        "serverUpdatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "fileName", "base64Data", "updatedAt", "isDeleted"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile and sync metadata"
+    },
+    "/users/{userId}/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/SyncTransaction" },
+      "description": "User financial transactions"
+    },
+    "/users/{userId}/accounts/{accountId}": {
+      "schema": { "$ref": "#/entities/SyncAccount" },
+      "description": "User wallets and bank accounts"
+    },
+    "/users/{userId}/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/SyncCategory" },
+      "description": "User transaction categories"
+    },
+    "/users/{userId}/debts/{debtId}": {
+      "schema": { "$ref": "#/entities/SyncDebt" },
+      "description": "User debts and receivables"
+    },
+    "/users/{userId}/assets/{assetId}": {
+      "schema": { "$ref": "#/entities/SyncAsset" },
+      "description": "User investment and cash assets"
+    },
+    "/users/{userId}/labels/{labelId}": {
+      "schema": { "$ref": "#/entities/SyncLabel" },
+      "description": "User transaction labels"
+    },
+    "/users/{userId}/budgets/{budgetId}": {
+      "schema": { "$ref": "#/entities/SyncBudget" },
+      "description": "User budget allocations"
+    },
+    "/users/{userId}/recurringTransactions/{recurringId}": {
+      "schema": { "$ref": "#/entities/SyncRecurring" },
+      "description": "User recurring bills and income"
+    },
+    "/users/{userId}/financialPlans/{planId}": {
+      "schema": { "$ref": "#/entities/SyncFinancialPlan" },
+      "description": "User monthly allocation plans"
+    },
+    "/users/{userId}/events/{eventId}": {
+      "schema": { "$ref": "#/entities/SyncEvent" },
+      "description": "User events and trips"
+    },
+    "/users/{userId}/savingsGoals/{goalId}": {
+      "schema": { "$ref": "#/entities/SyncSavingsGoal" },
+      "description": "User savings goals"
+    },
+    "/users/{userId}/timelineScenarios/{scenarioId}": {
+      "schema": { "$ref": "#/entities/SyncTimelineScenario" },
+      "description": "User cashflow timeline scenarios"
+    },
+    "/users/{userId}/appSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/SyncAppSettings" },
+      "description": "Full app settings and layout preferences"
+    },
+    "/users/{userId}/customLogos/{logoId}": {
+      "schema": { "$ref": "#/entities/SyncCustomLogo" },
+      "description": "Custom account and asset logo binaries"
+    }
+  }
+}

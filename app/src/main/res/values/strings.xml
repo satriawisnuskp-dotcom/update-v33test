@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">Money Tracker</string>
+    <string name="widget_balance_label">Ringkasan Saldo</string>
+    <string name="widget_balance_desc">Menampilkan total saldo semua dompet, nilai bersih, pemasukan, dan pengeluaran bulan ini.</string>
+    <string name="widget_quick_entry_label">Pencatatan Cepat</string>
+    <string name="widget_quick_entry_desc">Catat pengeluaran, pemasukan, transfer, atau buka ringkasan langsung dari layar utama.</string>
+    <string name="widget_wallet_budget_label">Dompet &amp; Anggaran</string>
+    <string name="widget_wallet_budget_desc">Pantau progres anggaran bulan ini dan saldo dompet aktif secara cepat.</string>
+</resources>
