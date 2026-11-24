@@ -9,6 +9,8 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,6 +21,8 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -36,6 +40,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Category
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Checkroom
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -386,7 +391,7 @@ fun ManageCategoriesDialog(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     // Category Icon matching meaning with distinctive color
-                                    val catColor = CategoryIconHelper.getCategoryColor(cat.name, cat.type)
+                                    val catColor = CategoryIconHelper.resolveCategoryColor(cat)
                                     val catIcon = CategoryIconHelper.getCategoryIcon(cat.name, cat.iconName)
                                     Box(
                                         modifier = Modifier
@@ -603,7 +608,7 @@ fun ManageCategoriesDialog(
                                                 Spacer(modifier = Modifier.width(10.dp))
 
                                                 // Subcategory Icon container - Color matches parent category
-                                                val subColor = CategoryIconHelper.getSubcategoryColor(cat.name, sub.name, cat.type)
+                                                val subColor = CategoryIconHelper.resolveCategoryColor(cat)
                                                 val subIcon = CategoryIconHelper.getCategoryIcon(sub.name, sub.iconName)
                                                 Box(
                                                     modifier = Modifier
@@ -779,9 +784,14 @@ fun ManageCategoriesDialog(
         var newCatName by remember { mutableStateOf("") }
         var newCatType by remember { mutableStateOf(if (selectedTab == 0) TransactionType.EXPENSE else TransactionType.INCOME) }
         var selectedIcon by remember { mutableStateOf("Category") }
+        var selectedColorHex by remember { mutableStateOf(0L) }
         var showIconPickerForAdd by remember { mutableStateOf(false) }
 
-        val previewColor = CategoryIconHelper.getCategoryColor(newCatName.ifBlank { "Umum" }, newCatType)
+        val previewColor = if (CategoryIconHelper.isExplicitCustomColor(selectedColorHex)) {
+            Color(selectedColorHex)
+        } else {
+            CategoryIconHelper.getDefaultCategoryColor(newCatName.ifBlank { "Umum" }, newCatType)
+        }
         val previewIcon = CategoryIconHelper.getCategoryIcon(newCatName, selectedIcon)
 
         AlertDialog(
@@ -791,7 +801,10 @@ fun ManageCategoriesDialog(
                 Text("Tambah Kategori Baru", fontWeight = FontWeight.Bold, color = TextWhite, fontSize = 17.sp)
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
                     OutlinedTextField(
                         value = newCatName,
                         onValueChange = { 
@@ -918,6 +931,16 @@ fun ManageCategoriesDialog(
                             }
                         }
                     }
+
+                    // Color Picker Section
+                    CategoryColorPickerSection(
+                        selectedColorHex = selectedColorHex,
+                        defaultPreviewColor = CategoryIconHelper.getDefaultCategoryColor(
+                            newCatName.ifBlank { "Umum" },
+                            newCatType
+                        ),
+                        onSelectColorHex = { selectedColorHex = it }
+                    )
                 }
             },
             confirmButton = {
@@ -929,6 +952,7 @@ fun ManageCategoriesDialog(
                                     name = newCatName.trim(),
                                     type = newCatType,
                                     iconName = selectedIcon,
+                                    colorHex = selectedColorHex,
                                     subcategories = listOf(
                                         SubcategoryItem(name = "Umum", iconName = selectedIcon)
                                     )
@@ -1013,7 +1037,7 @@ fun ManageCategoriesDialog(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    val parentColor = CategoryIconHelper.getCategoryColor(parentCat.name, parentCat.type)
+                                    val parentColor = CategoryIconHelper.resolveCategoryColor(parentCat)
                                     Box(
                                         modifier = Modifier
                                             .size(36.dp)
@@ -1074,21 +1098,29 @@ fun ManageCategoriesDialog(
         }
     }
 
-    // Modal 3: Ubah Nama & Ikon Kategori
+    // Modal 3: Ubah Nama, Ikon & Warna Kategori
     categoryToEdit?.let { cat ->
-        var editName by remember { mutableStateOf(cat.name) }
-        var editIcon by remember { mutableStateOf(cat.iconName) }
+        var editName by remember(cat.id) { mutableStateOf(cat.name) }
+        var editIcon by remember(cat.id) { mutableStateOf(cat.iconName) }
+        var editColorHex by remember(cat.id) { mutableStateOf(cat.colorHex) }
         var showEditIconPicker by remember { mutableStateOf(false) }
 
         val previewIcon = CategoryIconHelper.getCategoryIcon(editName, editIcon)
-        val previewColor = CategoryIconHelper.getCategoryColor(editName, cat.type)
+        val previewColor = if (CategoryIconHelper.isExplicitCustomColor(editColorHex)) {
+            Color(editColorHex)
+        } else {
+            CategoryIconHelper.getDefaultCategoryColor(editName, cat.type)
+        }
 
         AlertDialog(
             onDismissRequest = { categoryToEdit = null },
             containerColor = DarkSurface,
             title = { Text("Ubah Kategori", fontWeight = FontWeight.Bold, color = TextWhite) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
                     OutlinedTextField(
                         value = editName,
                         onValueChange = { editName = it },
@@ -1110,7 +1142,7 @@ fun ManageCategoriesDialog(
                             onClick = { showEditIconPicker = true },
                             shape = RoundedCornerShape(12.dp),
                             color = DarkSurfaceElevated,
-                            border = BorderStroke(1.dp, DarkCardBorder)
+                            border = BorderStroke(1.dp, previewColor.copy(alpha = 0.4f))
                         ) {
                             Row(
                                 modifier = Modifier
@@ -1124,7 +1156,8 @@ fun ManageCategoriesDialog(
                                         modifier = Modifier
                                             .size(36.dp)
                                             .clip(CircleShape)
-                                            .background(previewColor.copy(alpha = 0.15f)),
+                                            .background(previewColor.copy(alpha = 0.2f))
+                                            .border(1.dp, previewColor.copy(alpha = 0.45f), CircleShape),
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Icon(
@@ -1146,17 +1179,31 @@ fun ManageCategoriesDialog(
                             }
                         }
                     }
+
+                    // Pilihan Warna Kategori
+                    CategoryColorPickerSection(
+                        selectedColorHex = editColorHex,
+                        defaultPreviewColor = CategoryIconHelper.getDefaultCategoryColor(editName, cat.type),
+                        onSelectColorHex = { editColorHex = it }
+                    )
                 }
             },
             confirmButton = {
                 Button(
                     onClick = {
                         if (editName.isNotBlank()) {
-                            viewModel.updateCategory(cat.copy(name = editName.trim(), iconName = editIcon))
+                            viewModel.updateCategory(
+                                cat.copy(
+                                    name = editName.trim(),
+                                    iconName = editIcon,
+                                    colorHex = editColorHex
+                                )
+                            )
                             categoryToEdit = null
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentBlue),
+                    modifier = Modifier.testTag("btn_save_edit_category")
                 ) {
                     Text("Simpan", color = Color.White, fontWeight = FontWeight.Bold)
                 }
@@ -1222,7 +1269,7 @@ fun ManageCategoriesDialog(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    val parentColor = CategoryIconHelper.getCategoryColor(parentCat.name, parentCat.type)
+                                    val parentColor = CategoryIconHelper.resolveCategoryColor(parentCat)
                                     Box(
                                         modifier = Modifier
                                             .size(36.dp)
@@ -1458,6 +1505,109 @@ fun CategoryIconPickerModal(
                     colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated)
                 ) {
                     Text("Tutup", color = TextWhite, fontSize = 13.sp)
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun CategoryColorPickerSection(
+    selectedColorHex: Long,
+    defaultPreviewColor: Color,
+    onSelectColorHex: (Long) -> Unit
+) {
+    val hasCustom = CategoryIconHelper.isExplicitCustomColor(selectedColorHex)
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Warna Kategori",
+                fontSize = 12.sp,
+                color = TextMuted,
+                fontWeight = FontWeight.Medium
+            )
+            if (hasCustom) {
+                Text(
+                    text = "Reset Default",
+                    fontSize = 11.sp,
+                    color = AccentBlue,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clickable { onSelectColorHex(0L) }
+                        .testTag("btn_reset_category_color")
+                )
+            }
+        }
+
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = DarkSurfaceElevated,
+            border = BorderStroke(1.dp, DarkCardBorder),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            FlowRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Default swatch
+                val isDefaultSelected = !hasCustom
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(defaultPreviewColor)
+                        .border(
+                            width = if (isDefaultSelected) 2.5.dp else 1.dp,
+                            color = if (isDefaultSelected) Color.White else Color.White.copy(alpha = 0.25f),
+                            shape = CircleShape
+                        )
+                        .clickable { onSelectColorHex(0L) }
+                        .testTag("swatch_category_default"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isDefaultSelected) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Warna Default",
+                            tint = Color.White,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                }
+
+                CategoryIconHelper.categoryColorPalette.forEach { swatch ->
+                    val isSelected = selectedColorHex == swatch.colorHex
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(Color(swatch.colorHex))
+                            .border(
+                                width = if (isSelected) 2.5.dp else 0.8.dp,
+                                color = if (isSelected) Color.White else Color.White.copy(alpha = 0.2f),
+                                shape = CircleShape
+                            )
+                            .clickable { onSelectColorHex(swatch.colorHex) }
+                            .testTag("swatch_category_${swatch.label.lowercase().replace(" ", "_")}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isSelected) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = swatch.label,
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
                 }
             }
         }

@@ -33,14 +33,18 @@ import com.example.data.model.TransactionType
 import com.example.data.model.UpcomingScheduleItem
 import com.example.data.model.UserSettings
 import com.example.data.sync.CloudSyncRepository
+import com.example.data.sync.RecurringCloudClaimResult
+import com.example.data.sync.RecurringCloudGateway
 import com.example.data.sync.SyncStatus
 import com.example.util.ImageUploadHelper
 import com.example.util.IndonesianInstitutionHelper
 import com.example.util.TradingViewHelper
 import com.example.util.TradingViewQuote
 import com.example.util.TransactionMathHelper
+import com.google.firebase.Firebase
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseUser
+import com.google.firebase.auth.auth
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -51,12 +55,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.ref.WeakReference
 import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Collections
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
@@ -91,16 +98,31 @@ class FinanceRepository(private val context: Context? = null) {
     private val ioScope = CoroutineScope(dbDispatcher + SupervisorJob())
     private val syncObserverScope = CoroutineScope(dbDispatcher + SupervisorJob())
 
+    data class DuplicateRecurringEntry(
+        val duplicate: Transaction,
+        val original: Transaction,
+        val rule: RecurringTransaction?
+    )
+
     private val roomInitialized = AtomicBoolean(false)
     private val initialSeedComplete = CompletableDeferred<Unit>()
     private val pendingTransactionWrites = AtomicInteger(0)
     private val pendingWalletWrites = AtomicInteger(0)
     private val pendingCategoryWrites = AtomicInteger(0)
     private val pendingDebtWrites = AtomicInteger(0)
+    private val pendingRecurringWrites = AtomicInteger(0)
+    private val pendingAppSettingsWrites = AtomicInteger(0)
     private val transactionWriteSeq = AtomicLong(0L)
     private val walletWriteSeq = AtomicLong(0L)
     private val categoryWriteSeq = AtomicLong(0L)
     private val debtWriteSeq = AtomicLong(0L)
+    private val recurringWriteSeq = AtomicLong(0L)
+    private val appSettingsWriteSeq = AtomicLong(0L)
+    private val recurringExecutionLock = Any()
+    private val recurringClaimMutex = Mutex()
+    private val inFlightRecurringOccurrences = Collections.synchronizedSet(mutableSetOf<String>())
+    @Volatile private var pendingAutoRecurringCheckDate: Triple<Int, Int, Int>? = null
+    @Volatile private var testRecurringCloudGateway: RecurringCloudGateway? = null
     @Volatile private var appDatabase: AppDatabase? = null
 
     init {
@@ -111,6 +133,18 @@ class FinanceRepository(private val context: Context? = null) {
         syncObserverScope.cancel()
         ioScope.cancel()
     }
+
+    internal fun setRecurringCloudGatewayForTests(gateway: RecurringCloudGateway?) {
+        testRecurringCloudGateway = gateway
+    }
+
+    internal fun resetRecurringCloudGatewayForTests() {
+        testRecurringCloudGateway = null
+    }
+
+    private fun getActiveRecurringCloudGateway(): RecurringCloudGateway? =
+        testRecurringCloudGateway ?: cloudSyncRepository
+
     @Volatile private var cloudSyncRepository: CloudSyncRepository? = null
     private val googleAuthManager by lazy { GoogleAuthManager() }
 
@@ -203,6 +237,9 @@ class FinanceRepository(private val context: Context? = null) {
         syncDebtPaymentsWithTransactions(
             defaultTimestamp = if (hasExistingDiskData) System.currentTimeMillis() else 1L
         )
+        syncAssetSaleTransactions(
+            defaultTimestamp = if (hasExistingDiskData) System.currentTimeMillis() else 1L
+        )
         if (ctx != null) {
             initializeRoomAndSync(ctx, hasExistingDiskData)
         }
@@ -218,6 +255,9 @@ class FinanceRepository(private val context: Context? = null) {
                 saveToDisk(ctx)
             }
             syncDebtPaymentsWithTransactions(
+                defaultTimestamp = if (hasExistingDiskData) System.currentTimeMillis() else 1L
+            )
+            syncAssetSaleTransactions(
                 defaultTimestamp = if (hasExistingDiskData) System.currentTimeMillis() else 1L
             )
         }
@@ -416,6 +456,12 @@ class FinanceRepository(private val context: Context? = null) {
         }.getOrNull()
         cloudSyncRepository = syncRepo
         if (syncRepo != null) {
+            syncRepo.onCloudReconcileCompleted = { _ ->
+                handleCloudReconcileCompleted()
+            }
+            syncRepo.onCloudCollectionMerged = { collectionName ->
+                handleCloudCollectionMerged(collectionName)
+            }
             _currentUser.value = syncRepo.currentUser.value
             _syncStatus.value = syncRepo.syncStatus.value
             _lastSyncedAt.value = syncRepo.lastSyncedAt.value
@@ -507,6 +553,7 @@ class FinanceRepository(private val context: Context? = null) {
                                 }
                             }
                             if (applied) {
+                                com.example.util.CategoryIconHelper.updateCustomCategoryColors(mapped)
                                 saveToDisk(appCtx)
                             }
                         }
@@ -567,9 +614,28 @@ class FinanceRepository(private val context: Context? = null) {
         }
         syncObserverScope.launch {
             initialSeedComplete.await()
-            db.recurringDao().observeActive().collect { entities ->
-                _recurringTransactions.value = entities.map { it.toDomain() }
-                saveToDisk(appCtx)
+            db.recurringDao().observeActive().collect { _ ->
+                if (pendingRecurringWrites.get() == 0) {
+                    val seqBefore = recurringWriteSeq.get()
+                    val freshEntities = db.recurringDao().getAllRaw()
+                        .filterNot { it.isDeleted }
+                        .sortedWith(compareBy<com.example.data.local.RecurringEntity> { it.sortOrder }.thenBy { it.dayOfMonth })
+                    if (pendingRecurringWrites.get() == 0 && recurringWriteSeq.get() == seqBefore) {
+                        val mapped = freshEntities.map { it.toDomain() }
+                        var applied = false
+                        _recurringTransactions.update { current ->
+                            if (pendingRecurringWrites.get() == 0 && recurringWriteSeq.get() == seqBefore) {
+                                applied = true
+                                mapped
+                            } else {
+                                current
+                            }
+                        }
+                        if (applied) {
+                            saveToDisk(appCtx)
+                        }
+                    }
+                }
             }
         }
         syncObserverScope.launch {
@@ -615,21 +681,35 @@ class FinanceRepository(private val context: Context? = null) {
         syncObserverScope.launch {
             initialSeedComplete.await()
             db.appSettingsDao().observeMain().collect { entity ->
-                if (entity != null) {
-                    _settings.value = RoomEntityMappers.parseUserSettings(entity.settingsJson)
-                    _selectedWalletFilter.value = entity.selectedWalletFilter.ifBlank { "Semua" }
-                    _upcomingItems.value = RoomEntityMappers.parseUpcomingItems(entity.upcomingItemsJson)
-                    val matchingPlan = if (entity.activePlanId.isNotBlank()) {
-                        _financialPlans.value.find { it.id == entity.activePlanId }
-                    } else null
-                    if (matchingPlan != null) {
-                        _activePlanId.value = matchingPlan.id
-                        _planTitle.value = matchingPlan.title
-                        _plannedItems.value = matchingPlan.items
-                    } else if (entity.planTitle.isNotBlank()) {
-                        _planTitle.value = entity.planTitle
+                if (entity != null && pendingAppSettingsWrites.get() == 0) {
+                    val seqBefore = appSettingsWriteSeq.get()
+                    val parsedSettings = RoomEntityMappers.parseUserSettings(entity.settingsJson)
+                    if (pendingAppSettingsWrites.get() == 0 && appSettingsWriteSeq.get() == seqBefore) {
+                        var applied = false
+                        _settings.update { current ->
+                            if (pendingAppSettingsWrites.get() == 0 && appSettingsWriteSeq.get() == seqBefore) {
+                                applied = true
+                                parsedSettings
+                            } else {
+                                current
+                            }
+                        }
+                        if (applied) {
+                            _selectedWalletFilter.value = entity.selectedWalletFilter.ifBlank { "Semua" }
+                            _upcomingItems.value = RoomEntityMappers.parseUpcomingItems(entity.upcomingItemsJson)
+                            val matchingPlan = if (entity.activePlanId.isNotBlank()) {
+                                _financialPlans.value.find { it.id == entity.activePlanId }
+                            } else null
+                            if (matchingPlan != null) {
+                                _activePlanId.value = matchingPlan.id
+                                _planTitle.value = matchingPlan.title
+                                _plannedItems.value = matchingPlan.items
+                            } else if (entity.planTitle.isNotBlank()) {
+                                _planTitle.value = entity.planTitle
+                            }
+                            saveToDisk(appCtx)
+                        }
                     }
-                    saveToDisk(appCtx)
                 }
             }
         }
@@ -1032,21 +1112,33 @@ class FinanceRepository(private val context: Context? = null) {
         val db = appDatabase ?: return
         val indexById = fullOrderList.mapIndexed { idx, r -> r.id to idx }.toMap()
         val entities = items.map { it.toEntity(sortOrder = indexById[it.id] ?: 0) }
+        recurringWriteSeq.incrementAndGet()
+        pendingRecurringWrites.incrementAndGet()
         ioScope.launch {
-            initialSeedComplete.await()
-            db.recurringDao().upsertAll(entities)
-            cloudSyncRepository?.pushRecurrings(entities)
+            try {
+                initialSeedComplete.await()
+                db.recurringDao().upsertAll(entities)
+                cloudSyncRepository?.pushRecurrings(entities)
+            } finally {
+                pendingRecurringWrites.decrementAndGet()
+            }
         }
     }
 
     private fun softDeleteRecurringAndSync(recurringId: String, timestamp: Long = System.currentTimeMillis()) {
         val db = appDatabase ?: return
         val safeId = RoomEntityMappers.sanitizeFirestoreId(recurringId)
+        recurringWriteSeq.incrementAndGet()
+        pendingRecurringWrites.incrementAndGet()
         ioScope.launch {
-            initialSeedComplete.await()
-            db.recurringDao().softDelete(safeId, timestamp)
-            db.recurringDao().getById(safeId)?.let { deleted ->
-                cloudSyncRepository?.pushRecurring(deleted)
+            try {
+                initialSeedComplete.await()
+                db.recurringDao().softDelete(safeId, timestamp)
+                db.recurringDao().getById(safeId)?.let { deleted ->
+                    cloudSyncRepository?.pushRecurring(deleted)
+                }
+            } finally {
+                pendingRecurringWrites.decrementAndGet()
             }
         }
     }
@@ -1170,10 +1262,16 @@ class FinanceRepository(private val context: Context? = null) {
             upcomingItemsJson = RoomEntityMappers.serializeUpcomingItems(_upcomingItems.value),
             updatedAt = timestamp
         )
+        appSettingsWriteSeq.incrementAndGet()
+        pendingAppSettingsWrites.incrementAndGet()
         ioScope.launch {
-            initialSeedComplete.await()
-            db.appSettingsDao().upsert(entity)
-            cloudSyncRepository?.pushAppSettings(entity)
+            try {
+                initialSeedComplete.await()
+                db.appSettingsDao().upsert(entity)
+                cloudSyncRepository?.pushAppSettings(entity)
+            } finally {
+                pendingAppSettingsWrites.decrementAndGet()
+            }
         }
     }
 
@@ -1216,8 +1314,10 @@ class FinanceRepository(private val context: Context? = null) {
         if (data.categories.isNotEmpty()) {
             _categories.value = data.categories
         }
+        com.example.util.CategoryIconHelper.updateCustomCategoryColors(_categories.value)
         IndonesianInstitutionHelper.syncWithWalletsAndAssets(data.wallets, data.assets)
         syncDebtPaymentsWithTransactions()
+        syncAssetSaleTransactions()
         return true
     }
 
@@ -1265,6 +1365,7 @@ class FinanceRepository(private val context: Context? = null) {
         _timelineScenarios.value = emptyList()
         _selectedWalletFilter.value = "Semua"
         _categories.value = FinanceStorageHelper.getDefaultCategories()
+        com.example.util.CategoryIconHelper.updateCustomCategoryColors(_categories.value)
         _labels.value = listOf("Investasi", "Pribadi", "Keluarga", "Tabungan")
         _settings.value = UserSettings(hasCompletedOnboarding = false)
         IndonesianInstitutionHelper.syncWithWalletsAndAssets(emptyList(), emptyList())
@@ -1412,7 +1513,16 @@ class FinanceRepository(private val context: Context? = null) {
     fun addTransaction(tx: Transaction) {
         val now = System.currentTimeMillis()
         val cleanTx = TransactionMathHelper.sanitizeTransaction(tx).copy(updatedAt = now, isDeleted = false)
-        _transactions.update { (listOf(cleanTx) + it).sortedWith(TransactionMathHelper.transactionChronologicalDescendingComparator) }
+        var inserted = false
+        _transactions.update { current ->
+            if (current.any { it.id == cleanTx.id && !it.isDeleted }) {
+                current
+            } else {
+                inserted = true
+                (listOf(cleanTx) + current).sortedWith(TransactionMathHelper.transactionChronologicalDescendingComparator)
+            }
+        }
+        if (!inserted) return
 
         val modifiedWallets = mutableListOf<AccountWallet>()
         // Reactively adjust wallet balance
@@ -1546,15 +1656,24 @@ class FinanceRepository(private val context: Context? = null) {
         }
 
         val modifiedAssets = mutableListOf<AssetItem>()
-        if (cleanTx.type == TransactionType.TRANSFER && (cleanTx.targetAssetId.isNotBlank() || cleanTx.targetAssetName.isNotBlank())) {
+        if ((cleanTx.type == TransactionType.TRANSFER || cleanTx.type == TransactionType.INCOME) && (cleanTx.targetAssetId.isNotBlank() || cleanTx.targetAssetName.isNotBlank())) {
             val recId = "tx_${cleanTx.id}"
             val assetRecId = "asset_rec_${cleanTx.id}"
+            val rawAssetRecId = if (cleanTx.id.startsWith("asset_rec_")) cleanTx.id.removePrefix("asset_rec_") else ""
             _assets.update { list ->
                 list.map { asset ->
                     if (asset.id == cleanTx.targetAssetId || (cleanTx.targetAssetName.isNotBlank() && asset.name.equals(cleanTx.targetAssetName, ignoreCase = true))) {
+                        val revertedVal = if (cleanTx.type == TransactionType.INCOME) {
+                            asset.value + cleanTx.amount
+                        } else {
+                            (asset.value - cleanTx.amount).coerceAtLeast(0.0)
+                        }
                         asset.copy(
-                            value = (asset.value - cleanTx.amount).coerceAtLeast(0.0),
-                            records = asset.records.filterNot { it.id == recId || it.id == assetRecId || it.id == cleanTx.id },
+                            value = revertedVal,
+                            records = asset.records.filterNot {
+                                it.id == recId || it.id == assetRecId || it.id == cleanTx.id ||
+                                    (rawAssetRecId.isNotBlank() && it.id == rawAssetRecId)
+                            },
                             updatedAt = now
                         ).also { modifiedAssets.add(it) }
                     } else asset
@@ -1746,15 +1865,24 @@ class FinanceRepository(private val context: Context? = null) {
         }
 
         val modifiedAssets = mutableMapOf<String, AssetItem>()
-        targets.filter { it.type == TransactionType.TRANSFER && (it.targetAssetId.isNotBlank() || it.targetAssetName.isNotBlank()) }.forEach { target ->
+        targets.filter { (it.type == TransactionType.TRANSFER || it.type == TransactionType.INCOME) && (it.targetAssetId.isNotBlank() || it.targetAssetName.isNotBlank()) }.forEach { target ->
             val recId = "tx_${target.id}"
             val assetRecId = "asset_rec_${target.id}"
+            val rawAssetRecId = if (target.id.startsWith("asset_rec_")) target.id.removePrefix("asset_rec_") else ""
             _assets.update { list ->
                 list.map { asset ->
                     if (asset.id == target.targetAssetId || (target.targetAssetName.isNotBlank() && asset.name.equals(target.targetAssetName, ignoreCase = true))) {
+                        val revertedVal = if (target.type == TransactionType.INCOME) {
+                            asset.value + target.amount
+                        } else {
+                            (asset.value - target.amount).coerceAtLeast(0.0)
+                        }
                         asset.copy(
-                            value = (asset.value - target.amount).coerceAtLeast(0.0),
-                            records = asset.records.filterNot { it.id == recId || it.id == assetRecId || it.id == target.id },
+                            value = revertedVal,
+                            records = asset.records.filterNot {
+                                it.id == recId || it.id == assetRecId || it.id == target.id ||
+                                    (rawAssetRecId.isNotBlank() && it.id == rawAssetRecId)
+                            },
                             updatedAt = now
                         ).also { modifiedAssets[it.id] = it }
                     } else asset
@@ -2169,6 +2297,39 @@ class FinanceRepository(private val context: Context? = null) {
         }
     }
 
+    fun syncAssetSaleTransactions(defaultTimestamp: Long = System.currentTimeMillis()) {
+        val saleRecordIds = _assets.value
+            .flatMap { it.records }
+            .filter { !it.isIncrease && it.sourceWalletName.isNotBlank() }
+            .associateBy { "asset_rec_${it.id}" }
+        if (saleRecordIds.isEmpty()) return
+
+        val assetNamesById = _assets.value.associate { it.id to it.name }
+        val updatedTxs = mutableListOf<Transaction>()
+        _transactions.update { list ->
+            list.map { tx ->
+                val matchingRec = saleRecordIds[tx.id]
+                if (matchingRec != null && tx.type == TransactionType.TRANSFER) {
+                    val assetName = assetNamesById[matchingRec.assetId] ?: tx.targetAssetName.ifBlank { "Aset" }
+                    tx.copy(
+                        type = TransactionType.INCOME,
+                        category = "Penjualan Aset",
+                        title = if (matchingRec.note.isNotBlank()) matchingRec.note else "Penjualan $assetName",
+                        updatedAt = defaultTimestamp
+                    ).also { updatedTxs.add(it) }
+                } else {
+                    tx
+                }
+            }
+        }
+        if (updatedTxs.isNotEmpty()) {
+            if (initialSeedComplete.isCompleted) {
+                persistTransactionsAndSync(updatedTxs)
+            }
+            saveToDisk()
+        }
+    }
+
     fun addAssetRecord(assetId: String, record: AssetRecord, updateWalletBalance: Boolean = true) {
         val now = System.currentTimeMillis()
         val modifiedAssets = mutableListOf<AssetItem>()
@@ -2235,10 +2396,10 @@ class FinanceRepository(private val context: Context? = null) {
             val parsed = parseDateString(record.date)
             val tx = Transaction(
                 id = "asset_rec_${record.id}",
-                title = if (record.note.isNotBlank()) record.note else "Transfer ke $assetName",
-                category = "Asset",
+                title = if (record.note.isNotBlank()) record.note else if (record.isIncrease) "Transfer ke $assetName" else "Penjualan $assetName",
+                category = if (record.isIncrease) "Asset" else "Penjualan Aset",
                 amount = record.amount,
-                type = TransactionType.TRANSFER,
+                type = if (record.isIncrease) TransactionType.TRANSFER else TransactionType.INCOME,
                 accountName = record.sourceWalletName,
                 dayOfMonth = parsed.day,
                 monthIndex = parsed.month,
@@ -2301,10 +2462,10 @@ class FinanceRepository(private val context: Context? = null) {
                 val parsed = parseDateString(updatedRecord.date)
                 val tx = Transaction(
                     id = "asset_rec_${updatedRecord.id}",
-                    title = if (updatedRecord.note.isNotBlank()) updatedRecord.note else "Transfer ke $assetName",
-                    category = "Asset",
+                    title = if (updatedRecord.note.isNotBlank()) updatedRecord.note else if (updatedRecord.isIncrease) "Transfer ke $assetName" else "Penjualan $assetName",
+                    category = if (updatedRecord.isIncrease) "Asset" else "Penjualan Aset",
                     amount = updatedRecord.amount,
-                    type = TransactionType.TRANSFER,
+                    type = if (updatedRecord.isIncrease) TransactionType.TRANSFER else TransactionType.INCOME,
                     accountName = updatedRecord.sourceWalletName,
                     dayOfMonth = parsed.day,
                     monthIndex = parsed.month,
@@ -3053,6 +3214,70 @@ class FinanceRepository(private val context: Context? = null) {
         saveToDisk()
     }
 
+    fun saveTransactionTemplate(template: com.example.data.model.TransactionTemplate) {
+        val now = System.currentTimeMillis()
+        val current = _settings.value.transactionTemplates
+        val existingIdx = current.indexOfFirst { it.id == template.id }
+        val updatedList = if (existingIdx >= 0) {
+            current.mapIndexed { idx, item ->
+                if (idx == existingIdx) {
+                    template.copy(sortOrder = idx, updatedAt = now)
+                } else {
+                    item.copy(sortOrder = idx)
+                }
+            }
+        } else {
+            val stamped = template.copy(sortOrder = current.size, updatedAt = now)
+            (current + stamped).mapIndexed { idx, item -> item.copy(sortOrder = idx) }
+        }
+        _settings.value = _settings.value.copy(transactionTemplates = updatedList)
+        persistAppSettingsAndSync(now)
+        saveToDisk()
+    }
+
+    fun renameTransactionTemplate(templateId: String, newName: String) {
+        val trimmed = newName.trim()
+        if (trimmed.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val updatedList = _settings.value.transactionTemplates.mapIndexed { idx, item ->
+            if (item.id == templateId) {
+                item.copy(name = trimmed, sortOrder = idx, updatedAt = now)
+            } else {
+                item.copy(sortOrder = idx)
+            }
+        }
+        _settings.value = _settings.value.copy(transactionTemplates = updatedList)
+        persistAppSettingsAndSync(now)
+        saveToDisk()
+    }
+
+    fun deleteTransactionTemplate(templateId: String) {
+        val now = System.currentTimeMillis()
+        val updatedList = _settings.value.transactionTemplates
+            .filterNot { it.id == templateId }
+            .mapIndexed { idx, item -> item.copy(sortOrder = idx) }
+        _settings.value = _settings.value.copy(transactionTemplates = updatedList)
+        persistAppSettingsAndSync(now)
+        saveToDisk()
+    }
+
+    fun reorderTransactionTemplates(reordered: List<com.example.data.model.TransactionTemplate>) {
+        val now = System.currentTimeMillis()
+        val updatedList = reordered.mapIndexed { idx, item ->
+            item.copy(sortOrder = idx, updatedAt = now)
+        }
+        _settings.value = _settings.value.copy(transactionTemplates = updatedList)
+        persistAppSettingsAndSync(now)
+        saveToDisk()
+    }
+
+    fun setShowTemplatesAboveCategories(show: Boolean) {
+        val now = System.currentTimeMillis()
+        _settings.value = _settings.value.copy(showTemplatesAboveCategories = show)
+        persistAppSettingsAndSync(now)
+        saveToDisk()
+    }
+
     fun addSavingsGoal(goal: SavingsGoal) {
         val stamped = goal.copy(updatedAt = System.currentTimeMillis(), isDeleted = false)
         _savingsGoals.update { it + stamped }
@@ -3490,6 +3715,7 @@ class FinanceRepository(private val context: Context? = null) {
         _categories.update { current ->
             current + stamped
         }
+        com.example.util.CategoryIconHelper.updateCustomCategoryColors(_categories.value)
         persistCategoriesAndSync(listOf(stamped), _categories.value)
         saveToDisk()
     }
@@ -3501,6 +3727,7 @@ class FinanceRepository(private val context: Context? = null) {
         _categories.update { current ->
             current.map { if (it.id == stamped.id) stamped else it }
         }
+        com.example.util.CategoryIconHelper.updateCustomCategoryColors(_categories.value)
         val changedTxs = mutableListOf<Transaction>()
         if (oldCategory != null && !oldCategory.name.equals(stamped.name, ignoreCase = false)) {
             _transactions.update { list ->
@@ -3521,6 +3748,7 @@ class FinanceRepository(private val context: Context? = null) {
         val now = System.currentTimeMillis()
         val stamped = newCategories.map { it.copy(updatedAt = now, isDeleted = false) }
         _categories.value = stamped
+        com.example.util.CategoryIconHelper.updateCustomCategoryColors(stamped)
         persistCategoriesAndSync(stamped, stamped)
         saveToDisk()
     }
@@ -3544,6 +3772,7 @@ class FinanceRepository(private val context: Context? = null) {
         _categories.update { current ->
             current.filterNot { it.id == categoryId }
         }
+        com.example.util.CategoryIconHelper.updateCustomCategoryColors(_categories.value)
         softDeleteCategoryAndSync(categoryId)
         saveToDisk()
     }
@@ -3657,32 +3886,61 @@ class FinanceRepository(private val context: Context? = null) {
     ) {
         val now = System.currentTimeMillis()
         var itemToAdd = recurring.copy(updatedAt = now, isDeleted = false)
-        if (checkImmediateProcess && recurring.isActive && recurring.autoDeduct && recurring.dayOfMonth <= currentDay) {
-            val key = "$currentMonth/$currentYear"
-            if (itemToAdd.lastProcessedMonthYear != key) {
-                val dayOfWeek = getDayOfWeekName(itemToAdd.dayOfMonth, currentMonth, currentYear)
-                val tx = Transaction(
-                    title = itemToAdd.title,
-                    category = itemToAdd.category,
-                    subcategory = itemToAdd.subcategory,
-                    amount = itemToAdd.amount,
-                    type = itemToAdd.type,
-                    accountName = itemToAdd.accountName,
-                    toAccountName = if (itemToAdd.type == TransactionType.TRANSFER) itemToAdd.toAccountName else "",
-                    dayOfMonth = itemToAdd.dayOfMonth,
-                    monthIndex = currentMonth,
-                    year = currentYear,
-                    dayOfWeekName = dayOfWeek,
-                    note = if (itemToAdd.note.isNotBlank()) "${itemToAdd.note} (Otomatis Rutin)" else "Otomatis dari Transaksi Berulang",
-                    label = itemToAdd.label,
-                    recurrence = "Bulanan (Tgl ${itemToAdd.dayOfMonth})"
+        var immediateTx: Transaction? = null
+        val cycleKey = RoomEntityMappers.buildRecurringCycleKey(currentMonth, currentYear)
+        if (checkImmediateProcess &&
+            isRecurringDueOnDate(itemToAdd, currentDay, currentMonth, currentYear) &&
+            !hasExistingOccurrenceForPeriod(
+                recurring = itemToAdd,
+                month = currentMonth,
+                year = currentYear,
+                effectiveDay = itemToAdd.dayOfMonth,
+                occurrenceTxId = RoomEntityMappers.buildRecurringOccurrenceTxId(
+                    itemToAdd.id,
+                    currentMonth,
+                    currentYear,
+                    itemToAdd.dayOfMonth,
+                    itemToAdd.frequency
                 )
-                addTransaction(tx)
-                itemToAdd = itemToAdd.copy(lastProcessedMonthYear = key, updatedAt = System.currentTimeMillis())
+            )
+        ) {
+            val occurrenceId = RoomEntityMappers.buildRecurringOccurrenceTxId(
+                recurringId = itemToAdd.id,
+                month = currentMonth,
+                year = currentYear,
+                day = itemToAdd.dayOfMonth,
+                frequency = itemToAdd.frequency
+            )
+            val dayOfWeek = getDayOfWeekName(itemToAdd.dayOfMonth, currentMonth, currentYear)
+            val tx = Transaction(
+                id = occurrenceId,
+                title = itemToAdd.title,
+                category = itemToAdd.category,
+                subcategory = itemToAdd.subcategory,
+                amount = itemToAdd.amount,
+                type = itemToAdd.type,
+                accountName = itemToAdd.accountName,
+                toAccountName = if (itemToAdd.type == TransactionType.TRANSFER) itemToAdd.toAccountName else "",
+                dayOfMonth = itemToAdd.dayOfMonth,
+                monthIndex = currentMonth,
+                year = currentYear,
+                dayOfWeekName = dayOfWeek,
+                note = if (itemToAdd.note.isNotBlank()) "${itemToAdd.note} (Otomatis Rutin)" else "Otomatis dari Transaksi Berulang",
+                label = itemToAdd.label,
+                recurrence = "${itemToAdd.frequency} (Tgl ${itemToAdd.dayOfMonth})"
+            )
+            immediateTx = tx
+            itemToAdd = itemToAdd.copy(lastProcessedMonthYear = cycleKey, updatedAt = System.currentTimeMillis())
+        }
+        _recurringTransactions.update { current ->
+            if (current.any { it.id == itemToAdd.id }) {
+                current.map { if (it.id == itemToAdd.id) itemToAdd else it }
+            } else {
+                current + itemToAdd
             }
         }
-        _recurringTransactions.update { it + itemToAdd }
         persistRecurringAndSync(listOf(itemToAdd))
+        immediateTx?.let { addTransaction(it) }
         saveToDisk()
     }
 
@@ -3735,12 +3993,331 @@ class FinanceRepository(private val context: Context? = null) {
         saveToDisk()
     }
 
+    fun isAutoGeneratedRecurringTransaction(
+        tx: Transaction,
+        recurringRules: List<RecurringTransaction> = _recurringTransactions.value
+    ): Boolean {
+        if (tx.id.startsWith("recur_")) return true
+        val trimmedNote = tx.note.trim()
+        if (trimmedNote == "Otomatis dari Transaksi Berulang" || trimmedNote.endsWith("(Otomatis Rutin)")) {
+            return true
+        }
+        val rec = tx.recurrence.trim()
+        if (rec.isNotBlank() && rec != "Tidak pernah" && rec.contains("(Tgl ")) {
+            return true
+        }
+        return false
+    }
+
+    private fun matchRecurringRuleForTransaction(
+        tx: Transaction,
+        recurringRules: List<RecurringTransaction>
+    ): RecurringTransaction? {
+        if (tx.id.startsWith("recur_")) {
+            val byId = recurringRules.find { rule ->
+                tx.id == RoomEntityMappers.buildRecurringOccurrenceTxId(
+                    recurringId = rule.id,
+                    month = tx.monthIndex,
+                    year = tx.year,
+                    day = tx.dayOfMonth,
+                    frequency = rule.frequency
+                )
+            }
+            if (byId != null) return byId
+        }
+        return recurringRules.find { rule ->
+            rule.type == tx.type &&
+                rule.amount == tx.amount &&
+                rule.accountName.equals(tx.accountName, ignoreCase = true) &&
+                rule.category.equals(tx.category, ignoreCase = true) &&
+                (rule.toAccountName.isBlank() || tx.toAccountName.equals(rule.toAccountName, ignoreCase = true)) &&
+                (rule.title.equals(tx.title, ignoreCase = true) ||
+                    tx.note.contains(rule.note.ifBlank { "Otomatis" }, ignoreCase = true))
+        }
+    }
+
+    private fun hasExistingOccurrenceForPeriod(
+        recurring: RecurringTransaction,
+        month: Int,
+        year: Int,
+        effectiveDay: Int,
+        occurrenceTxId: String
+    ): Boolean {
+        val cycleKey = RoomEntityMappers.buildRecurringCycleKey(month, year)
+        if (!RoomEntityMappers.isDailyOrWeeklyFrequency(recurring.frequency) &&
+            recurring.lastProcessedMonthYear == cycleKey
+        ) {
+            return true
+        }
+        val isDailyOrWeekly = RoomEntityMappers.isDailyOrWeeklyFrequency(recurring.frequency)
+        return _transactions.value.any { tx ->
+            if (tx.isDeleted) return@any false
+            if (tx.id == occurrenceTxId) return@any true
+            if (!isAutoGeneratedRecurringTransaction(tx, _recurringTransactions.value)) return@any false
+            val matchesMeta = tx.type == recurring.type &&
+                tx.amount == recurring.amount &&
+                tx.accountName.equals(recurring.accountName, ignoreCase = true) &&
+                tx.category.equals(recurring.category, ignoreCase = true) &&
+                tx.monthIndex == month &&
+                tx.year == year &&
+                (!isDailyOrWeekly || tx.dayOfMonth == effectiveDay) &&
+                (tx.title.equals(recurring.title, ignoreCase = true) ||
+                    recurring.title.isBlank())
+            matchesMeta
+        }
+    }
+
+    private fun isRecurringDueOnDate(
+        item: RecurringTransaction,
+        currentDay: Int,
+        currentMonth: Int,
+        currentYear: Int
+    ): Boolean {
+        if (!item.isActive || !item.autoDeduct || item.isDeleted) return false
+        val cycleKey = RoomEntityMappers.buildRecurringCycleKey(currentMonth, currentYear)
+        if (item.lastProcessedMonthYear == cycleKey) return false
+
+        val currentYmd = currentYear * 10000 + currentMonth * 100 + currentDay
+
+        // Respect snoozedUntilDate if it points strictly to a future date
+        RoomEntityMappers.parseRecurringDayMonthYear(item.snoozedUntilDate)?.let { (sd, sm, sy) ->
+            val snoozeYmd = sy * 10000 + sm * 100 + sd
+            if (currentYmd < snoozeYmd) return false
+        }
+
+        // Respect endDate when endCondition == ON_DATE
+        if (item.endCondition == "ON_DATE" && item.endDate.isNotBlank()) {
+            RoomEntityMappers.parseRecurringDayMonthYear(item.endDate)?.let { (ed, em, ey) ->
+                val endYmd = ey * 10000 + em * 100 + ed
+                if (currentYmd > endYmd) return false
+            }
+        }
+
+        return item.dayOfMonth <= currentDay
+    }
+
+    private fun isSignedInWithGoogle(): Boolean {
+        if (getActiveRecurringCloudGateway()?.isSignedInAndOnline() == true) return true
+        if (_currentUser.value != null) return true
+        return runCatching {
+            val ctx = getActiveContext() ?: return@runCatching false
+            if (FirebaseApp.getApps(ctx).isNotEmpty()) {
+                com.google.firebase.Firebase.auth.currentUser != null
+            } else false
+        }.getOrDefault(false)
+    }
+
+    private fun shouldDeferAutoRecurringForCloudSync(): Boolean {
+        val gateway = getActiveRecurringCloudGateway()
+        if (gateway != null) {
+            return gateway.isSignedInAndOnline() && !gateway.hasCompletedInitialCloudSync()
+        }
+        return !roomInitialized.get() && isSignedInWithGoogle()
+    }
+
     fun processRecurringTransaction(id: String, month: Int, year: Int, dayOverride: Int? = null): Boolean {
         val recurring = _recurringTransactions.value.find { it.id == id } ?: return false
-        val key = "$month/$year"
         val effectiveDay = (dayOverride ?: recurring.dayOfMonth).coerceIn(1, 31)
+        val cycleKey = RoomEntityMappers.buildRecurringCycleKey(month, year)
+        val occurrenceTxId = RoomEntityMappers.buildRecurringOccurrenceTxId(
+            recurringId = recurring.id,
+            month = month,
+            year = year,
+            day = effectiveDay,
+            frequency = recurring.frequency
+        )
+        val lockKey = "${recurring.id}_$occurrenceTxId"
+
+        val gateway = getActiveRecurringCloudGateway()
+        if (gateway != null && gateway.isSignedInAndOnline()) {
+            synchronized(recurringExecutionLock) {
+                if (hasExistingOccurrenceForPeriod(recurring, month, year, effectiveDay, occurrenceTxId)) {
+                    healRecurringLastProcessedIfNeeded(recurring, cycleKey)
+                    return false
+                }
+                if (!inFlightRecurringOccurrences.add(lockKey)) {
+                    return false
+                }
+            }
+            ioScope.launch {
+                try {
+                    processRecurringTransactionSafelyInternal(
+                        id = id,
+                        month = month,
+                        year = year,
+                        dayOverride = dayOverride,
+                        alreadyReservedLockKey = lockKey
+                    )
+                } finally {
+                    inFlightRecurringOccurrences.remove(lockKey)
+                }
+            }
+            return true
+        }
+
+        synchronized(recurringExecutionLock) {
+            if (hasExistingOccurrenceForPeriod(recurring, month, year, effectiveDay, occurrenceTxId)) {
+                healRecurringLastProcessedIfNeeded(recurring, cycleKey)
+                return false
+            }
+            if (!inFlightRecurringOccurrences.add(lockKey)) {
+                return false
+            }
+            try {
+                return executeLocalRecurringOccurrence(recurring, month, year, effectiveDay, occurrenceTxId, cycleKey)
+            } finally {
+                inFlightRecurringOccurrences.remove(lockKey)
+            }
+        }
+    }
+
+    suspend fun processRecurringTransactionSafely(
+        id: String,
+        month: Int,
+        year: Int,
+        dayOverride: Int? = null
+    ): Boolean {
+        return recurringClaimMutex.withLock {
+            processRecurringTransactionSafelyInternal(id, month, year, dayOverride, alreadyReservedLockKey = null)
+        }
+    }
+
+    private suspend fun processRecurringTransactionSafelyInternal(
+        id: String,
+        month: Int,
+        year: Int,
+        dayOverride: Int?,
+        alreadyReservedLockKey: String?
+    ): Boolean {
+        val recurring = _recurringTransactions.value.find { it.id == id } ?: return false
+        val effectiveDay = (dayOverride ?: recurring.dayOfMonth).coerceIn(1, 31)
+        val cycleKey = RoomEntityMappers.buildRecurringCycleKey(month, year)
+        val occurrenceTxId = RoomEntityMappers.buildRecurringOccurrenceTxId(
+            recurringId = recurring.id,
+            month = month,
+            year = year,
+            day = effectiveDay,
+            frequency = recurring.frequency
+        )
+        val lockKey = "${recurring.id}_$occurrenceTxId"
+        var reservedHere = false
+
+        synchronized(recurringExecutionLock) {
+            if (hasExistingOccurrenceForPeriod(recurring, month, year, effectiveDay, occurrenceTxId)) {
+                healRecurringLastProcessedIfNeeded(recurring, cycleKey)
+                return false
+            }
+            if (alreadyReservedLockKey != lockKey) {
+                if (!inFlightRecurringOccurrences.add(lockKey)) {
+                    return false
+                }
+                reservedHere = true
+            }
+        }
+
+        return try {
+            // Double-check Room directly before attempting cloud claim or local write
+            val db = appDatabase
+            if (db != null) {
+                initialSeedComplete.await()
+                val roomTx = db.transactionDao().getById(occurrenceTxId)
+                val roomRec = db.recurringDao().getById(RoomEntityMappers.sanitizeFirestoreId(recurring.id))
+                if ((roomTx != null && !roomTx.isDeleted) ||
+                    (roomRec != null && !RoomEntityMappers.isDailyOrWeeklyFrequency(roomRec.frequency) &&
+                        roomRec.lastProcessedMonthYear == cycleKey)
+                ) {
+                    if (roomTx != null && !roomTx.isDeleted) {
+                        val domainTx = roomTx.toDomain()
+                        _transactions.update { list ->
+                            if (list.any { it.id == domainTx.id }) list
+                            else (listOf(domainTx) + list).sortedWith(TransactionMathHelper.transactionChronologicalDescendingComparator)
+                        }
+                    }
+                    healRecurringLastProcessedIfNeeded(recurring, cycleKey)
+                    return false
+                }
+            }
+
+            val gateway = getActiveRecurringCloudGateway()
+            if (gateway != null && gateway.isSignedInAndOnline()) {
+                val now = System.currentTimeMillis()
+                val tx = buildRecurringGeneratedTransaction(recurring, month, year, effectiveDay, occurrenceTxId, now)
+                val updatedRec = recurring.copy(
+                    lastProcessedMonthYear = cycleKey,
+                    snoozedUntilDate = "",
+                    lastSkippedDateLabel = "",
+                    updatedAt = now
+                )
+                val txEntity = tx.toEntity(
+                    accountIdResolved = resolveAccountId(tx.accountName),
+                    toAccountIdResolved = resolveAccountId(tx.toAccountName),
+                    updatedAtOverride = now
+                )
+                val recEntity = updatedRec.toEntity(
+                    sortOrder = _recurringTransactions.value.indexOfFirst { it.id == recurring.id }.coerceAtLeast(0),
+                    updatedAtOverride = now
+                )
+
+                when (val claim = gateway.tryClaimRecurringOccurrence(txEntity, recEntity, cycleKey)) {
+                    is RecurringCloudClaimResult.Claimed -> {
+                        applyClaimedRecurringLocally(tx, updatedRec)
+                        true
+                    }
+                    is RecurringCloudClaimResult.AlreadyClaimed -> {
+                        claim.remoteTransaction?.takeIf { !it.isDeleted }?.let { rTxEntity ->
+                            val domainTx = rTxEntity.toDomain()
+                            _transactions.update { list ->
+                                if (list.any { it.id == domainTx.id }) list
+                                else (listOf(domainTx) + list).sortedWith(TransactionMathHelper.transactionChronologicalDescendingComparator)
+                            }
+                        }
+                        claim.remoteRecurring?.takeIf { !it.isDeleted }?.let { rRecEntity ->
+                            val domainRec = rRecEntity.toDomain()
+                            _recurringTransactions.update { list ->
+                                list.map { if (it.id == domainRec.id) domainRec else it }
+                            }
+                        } ?: healRecurringLastProcessedIfNeeded(recurring, cycleKey, pushToCloud = false)
+                        saveToDisk()
+                        false
+                    }
+                    is RecurringCloudClaimResult.NotSignedInOrOffline -> {
+                        synchronized(recurringExecutionLock) {
+                            if (hasExistingOccurrenceForPeriod(recurring, month, year, effectiveDay, occurrenceTxId)) {
+                                false
+                            } else {
+                                executeLocalRecurringOccurrence(recurring, month, year, effectiveDay, occurrenceTxId, cycleKey)
+                            }
+                        }
+                    }
+                    is RecurringCloudClaimResult.Failed -> false
+                }
+            } else {
+                synchronized(recurringExecutionLock) {
+                    if (hasExistingOccurrenceForPeriod(recurring, month, year, effectiveDay, occurrenceTxId)) {
+                        false
+                    } else {
+                        executeLocalRecurringOccurrence(recurring, month, year, effectiveDay, occurrenceTxId, cycleKey)
+                    }
+                }
+            }
+        } finally {
+            if (reservedHere) {
+                inFlightRecurringOccurrences.remove(lockKey)
+            }
+        }
+    }
+
+    private fun buildRecurringGeneratedTransaction(
+        recurring: RecurringTransaction,
+        month: Int,
+        year: Int,
+        effectiveDay: Int,
+        occurrenceTxId: String,
+        timestamp: Long = System.currentTimeMillis()
+    ): Transaction {
         val dayOfWeek = getDayOfWeekName(effectiveDay, month, year)
-        val tx = Transaction(
+        return Transaction(
+            id = occurrenceTxId,
             title = recurring.title,
             category = recurring.category,
             subcategory = recurring.subcategory,
@@ -3754,22 +4331,96 @@ class FinanceRepository(private val context: Context? = null) {
             dayOfWeekName = dayOfWeek,
             note = if (recurring.note.isNotBlank()) recurring.note else "Otomatis dari Transaksi Berulang",
             label = recurring.label,
-            recurrence = "${recurring.frequency} (Tgl ${recurring.dayOfMonth})"
+            recurrence = "${recurring.frequency} (Tgl ${recurring.dayOfMonth})",
+            updatedAt = timestamp,
+            isDeleted = false
         )
-        addTransaction(tx)
+    }
+
+    private fun executeLocalRecurringOccurrence(
+        recurring: RecurringTransaction,
+        month: Int,
+        year: Int,
+        effectiveDay: Int,
+        occurrenceTxId: String,
+        cycleKey: String
+    ): Boolean {
         val now = System.currentTimeMillis()
+        val tx = buildRecurringGeneratedTransaction(recurring, month, year, effectiveDay, occurrenceTxId, now)
+        addTransaction(tx)
         var updatedItem: RecurringTransaction? = null
         _recurringTransactions.update { list ->
             list.map {
-                if (it.id == id) {
-                    it.copy(lastProcessedMonthYear = key, snoozedUntilDate = "", lastSkippedDateLabel = "", updatedAt = now)
-                        .also { upd -> updatedItem = upd }
+                if (it.id == recurring.id) {
+                    it.copy(
+                        lastProcessedMonthYear = cycleKey,
+                        snoozedUntilDate = "",
+                        lastSkippedDateLabel = "",
+                        updatedAt = now
+                    ).also { upd -> updatedItem = upd }
                 } else it
             }
         }
         updatedItem?.let { persistRecurringAndSync(listOf(it)) }
         saveToDisk()
         return true
+    }
+
+    private fun applyClaimedRecurringLocally(tx: Transaction, updatedItem: RecurringTransaction) {
+        addTransaction(tx)
+        _recurringTransactions.update { list ->
+            list.map {
+                if (it.id == updatedItem.id) updatedItem else it
+            }
+        }
+        persistRecurringAndSync(listOf(updatedItem))
+        saveToDisk()
+    }
+
+    private fun healRecurringLastProcessedIfNeeded(
+        recurring: RecurringTransaction,
+        cycleKey: String,
+        pushToCloud: Boolean = true
+    ) {
+        if (RoomEntityMappers.isDailyOrWeeklyFrequency(recurring.frequency)) return
+        if (recurring.lastProcessedMonthYear == cycleKey) return
+        val now = System.currentTimeMillis()
+        var healed: RecurringTransaction? = null
+        _recurringTransactions.update { list ->
+            list.map {
+                if (it.id == recurring.id && it.lastProcessedMonthYear != cycleKey) {
+                    it.copy(
+                        lastProcessedMonthYear = cycleKey,
+                        snoozedUntilDate = "",
+                        lastSkippedDateLabel = "",
+                        updatedAt = now
+                    ).also { upd -> healed = upd }
+                } else it
+            }
+        }
+        healed?.let { upd ->
+            if (pushToCloud) {
+                persistRecurringAndSync(listOf(upd))
+            } else {
+                val db = appDatabase
+                if (db != null) {
+                    val entity = upd.toEntity(
+                        sortOrder = _recurringTransactions.value.indexOfFirst { it.id == upd.id }.coerceAtLeast(0)
+                    )
+                    recurringWriteSeq.incrementAndGet()
+                    pendingRecurringWrites.incrementAndGet()
+                    ioScope.launch {
+                        try {
+                            initialSeedComplete.await()
+                            db.recurringDao().upsert(entity)
+                        } finally {
+                            pendingRecurringWrites.decrementAndGet()
+                        }
+                    }
+                }
+            }
+            saveToDisk()
+        }
     }
 
     fun skipRecurringOccurrence(id: String, month: Int, year: Int, skippedDateLabel: String = "") {
@@ -3867,15 +4518,230 @@ class FinanceRepository(private val context: Context? = null) {
     }
 
     fun checkAndExecuteDueRecurringTransactions(currentDay: Int, currentMonth: Int, currentYear: Int): Int {
-        val key = "$currentMonth/$currentYear"
+        if (shouldDeferAutoRecurringForCloudSync()) {
+            pendingAutoRecurringCheckDate = Triple(currentDay, currentMonth, currentYear)
+            return 0
+        }
+        val gateway = getActiveRecurringCloudGateway()
+        if (gateway != null && gateway.isSignedInAndOnline()) {
+            ioScope.launch {
+                checkAndExecuteDueRecurringTransactionsSafely(currentDay, currentMonth, currentYear)
+            }
+            return 0
+        }
         var executedCount = 0
-        _recurringTransactions.value.forEach { item ->
-            if (item.isActive && item.autoDeduct && item.dayOfMonth <= currentDay && item.lastProcessedMonthYear != key) {
-                processRecurringTransaction(item.id, currentMonth, currentYear)
-                executedCount++
+        val snapshot = _recurringTransactions.value.toList()
+        snapshot.forEach { item ->
+            if (isRecurringDueOnDate(item, currentDay, currentMonth, currentYear)) {
+                if (processRecurringTransaction(item.id, currentMonth, currentYear)) {
+                    executedCount++
+                }
             }
         }
         return executedCount
+    }
+
+    suspend fun checkAndExecuteDueRecurringTransactionsSafely(
+        currentDay: Int,
+        currentMonth: Int,
+        currentYear: Int
+    ): Int {
+        if (shouldDeferAutoRecurringForCloudSync()) {
+            pendingAutoRecurringCheckDate = Triple(currentDay, currentMonth, currentYear)
+            return 0
+        }
+        var executedCount = 0
+        val snapshot = _recurringTransactions.value.toList()
+        snapshot.forEach { item ->
+            if (isRecurringDueOnDate(item, currentDay, currentMonth, currentYear)) {
+                if (processRecurringTransactionSafely(item.id, currentMonth, currentYear)) {
+                    executedCount++
+                }
+            }
+        }
+        return executedCount
+    }
+
+    fun findDuplicateRecurringTransactions(): List<DuplicateRecurringEntry> {
+        val rules = _recurringTransactions.value
+        val activeAutoTxs = _transactions.value.filter { !it.isDeleted && isAutoGeneratedRecurringTransaction(it, rules) }
+        if (activeAutoTxs.size <= 1) return emptyList()
+
+        val grouped = activeAutoTxs.groupBy { tx ->
+            val matchedRule = matchRecurringRuleForTransaction(tx, rules)
+            if (matchedRule != null) {
+                val token = RoomEntityMappers.buildRecurringPeriodToken(
+                    month = tx.monthIndex,
+                    year = tx.year,
+                    day = tx.dayOfMonth,
+                    frequency = matchedRule.frequency
+                )
+                "rule:${matchedRule.id}:$token"
+            } else {
+                val periodPart = if (RoomEntityMappers.isDailyOrWeeklyFrequency(tx.recurrence)) {
+                    "${tx.year}-${tx.monthIndex}-${tx.dayOfMonth}"
+                } else {
+                    "${tx.year}-${tx.monthIndex}"
+                }
+                "orphan:${tx.type.name}:${tx.title.trim().lowercase(Locale.US)}:" +
+                    "${tx.category.trim().lowercase(Locale.US)}:${tx.accountName.trim().lowercase(Locale.US)}:" +
+                    "${tx.toAccountName.trim().lowercase(Locale.US)}:${tx.amount}:$periodPart"
+            }
+        }
+
+        val duplicates = mutableListOf<DuplicateRecurringEntry>()
+        grouped.values.forEach { group ->
+            if (group.size > 1) {
+                val keeper = group.minWithOrNull(
+                    compareBy<Transaction> { if (it.id.startsWith("recur_")) 0 else 1 }
+                        .thenBy { it.updatedAt }
+                        .thenBy { it.id }
+                ) ?: group.first()
+                val matchedRule = matchRecurringRuleForTransaction(keeper, rules)
+                group.filter { it.id != keeper.id }.forEach { dup ->
+                    duplicates.add(
+                        DuplicateRecurringEntry(
+                            duplicate = dup,
+                            original = keeper,
+                            rule = matchedRule
+                        )
+                    )
+                }
+            }
+        }
+        return duplicates
+    }
+
+    fun cleanupDuplicateRecurringTransactions(adjustWalletBalance: Boolean = false): Int {
+        synchronized(recurringExecutionLock) {
+            val duplicates = findDuplicateRecurringTransactions()
+            if (duplicates.isEmpty()) return 0
+
+            val now = System.currentTimeMillis()
+            val dupTxs = duplicates.map { it.duplicate }
+            val dupIds = dupTxs.map { it.id }.toSet()
+
+            _transactions.update { list -> list.filterNot { it.id in dupIds } }
+
+            if (adjustWalletBalance) {
+                val modifiedWallets = mutableListOf<AccountWallet>()
+                _wallets.update { wallets ->
+                    var currentWallets = wallets
+                    dupTxs.forEach { rawDup ->
+                        val cleanTx = TransactionMathHelper.sanitizeTransaction(rawDup)
+                        currentWallets = currentWallets.map { wallet ->
+                            val isSource = wallet.name.equals(cleanTx.accountName, ignoreCase = true)
+                            val isDest = cleanTx.toAccountName.isNotBlank() &&
+                                wallet.name.equals(cleanTx.toAccountName, ignoreCase = true)
+                            var newBal = wallet.balance
+                            if (isSource) {
+                                newBal = TransactionMathHelper.revertTransactionFromBalance(
+                                    newBal,
+                                    cleanTx,
+                                    isSourceAccount = true
+                                )
+                            }
+                            if (isDest && cleanTx.type == TransactionType.TRANSFER) {
+                                newBal = TransactionMathHelper.revertTransactionFromBalance(
+                                    newBal,
+                                    cleanTx,
+                                    isSourceAccount = false
+                                )
+                            }
+                            if (newBal != wallet.balance) {
+                                wallet.copy(balance = newBal, updatedAt = now)
+                            } else {
+                                wallet
+                            }
+                        }
+                    }
+                    wallets.forEachIndexed { idx, orig ->
+                        val updated = currentWallets[idx]
+                        if (updated != orig) modifiedWallets.add(updated)
+                    }
+                    currentWallets
+                }
+                if (modifiedWallets.isNotEmpty()) {
+                    persistWalletsAndSync(modifiedWallets)
+                }
+            }
+
+            softDeleteTransactionsAndSync(dupIds, now)
+            saveToDisk()
+            return dupIds.size
+        }
+    }
+
+    internal suspend fun handleCloudReconcileCompleted(
+        overrideDay: Int? = null,
+        overrideMonth: Int? = null,
+        overrideYear: Int? = null
+    ) {
+        val db = appDatabase
+        if (db != null) {
+            initialSeedComplete.await()
+            if (pendingTransactionWrites.get() == 0) {
+                val freshTxs = db.transactionDao().getAllRaw()
+                    .filterNot { it.isDeleted }
+                    .map { it.toDomain() }
+                    .sortedWith(TransactionMathHelper.transactionChronologicalDescendingComparator)
+                _transactions.value = freshTxs
+            }
+            if (pendingWalletWrites.get() == 0) {
+                val freshWallets = db.accountDao().getAllRaw()
+                    .filterNot { it.isDeleted }
+                    .sortedWith(compareBy<com.example.data.local.AccountEntity> { it.sortOrder }.thenBy { it.name })
+                    .map { it.toDomain() }
+                _wallets.value = freshWallets
+            }
+            if (pendingRecurringWrites.get() == 0) {
+                val freshRecurring = db.recurringDao().getAllRaw()
+                    .filterNot { it.isDeleted }
+                    .sortedWith(compareBy<com.example.data.local.RecurringEntity> { it.sortOrder }.thenBy { it.dayOfMonth })
+                    .map { it.toDomain() }
+                _recurringTransactions.value = freshRecurring
+            }
+        }
+
+        cleanupDuplicateRecurringTransactions(adjustWalletBalance = false)
+
+        val dateTriple = if (overrideDay != null && overrideMonth != null && overrideYear != null) {
+            Triple(overrideDay, overrideMonth, overrideYear)
+        } else {
+            val pending = pendingAutoRecurringCheckDate
+            pendingAutoRecurringCheckDate = null
+            if (pending != null) {
+                pending
+            } else {
+                val cal = Calendar.getInstance()
+                Triple(
+                    cal.get(Calendar.DAY_OF_MONTH),
+                    cal.get(Calendar.MONTH) + 1,
+                    cal.get(Calendar.YEAR)
+                )
+            }
+        }
+        checkAndExecuteDueRecurringTransactionsSafely(dateTriple.first, dateTriple.second, dateTriple.third)
+    }
+
+    private suspend fun handleCloudCollectionMerged(collectionName: String) {
+        val db = appDatabase ?: return
+        initialSeedComplete.await()
+        if (collectionName == "transactions" && pendingTransactionWrites.get() == 0) {
+            val freshTxs = db.transactionDao().getAllRaw()
+                .filterNot { it.isDeleted }
+                .map { it.toDomain() }
+                .sortedWith(TransactionMathHelper.transactionChronologicalDescendingComparator)
+            _transactions.value = freshTxs
+            cleanupDuplicateRecurringTransactions(adjustWalletBalance = false)
+        } else if (collectionName == "recurringTransactions" && pendingRecurringWrites.get() == 0) {
+            val freshRecurring = db.recurringDao().getAllRaw()
+                .filterNot { it.isDeleted }
+                .sortedWith(compareBy<com.example.data.local.RecurringEntity> { it.sortOrder }.thenBy { it.dayOfMonth })
+                .map { it.toDomain() }
+            _recurringTransactions.value = freshRecurring
+            cleanupDuplicateRecurringTransactions(adjustWalletBalance = false)
+        }
     }
 
     private fun getDayOfWeekName(day: Int, month: Int, year: Int): String {
@@ -4046,6 +4912,13 @@ class FinanceRepository(private val context: Context? = null) {
         root.put("totalAssets", _assets.value.size)
         root.put("totalDebts", _debts.value.size)
         root.put("totalCategories", _categories.value.size)
+        root.put(
+            "totalCustomCategoryColors",
+            _categories.value.count {
+                !it.isDeleted && com.example.util.CategoryIconHelper.isExplicitCustomColor(it.colorHex)
+            }
+        )
+        root.put("totalTemplates", _settings.value.transactionTemplates.size)
         root.put("totalPlans", _plannedItems.value.size)
         root.put("totalBudgets", _budgets.value.size)
         root.put("totalRecurring", _recurringTransactions.value.size)
@@ -4303,6 +5176,7 @@ class FinanceRepository(private val context: Context? = null) {
                 put("name", cat.name)
                 put("type", cat.type.name)
                 put("iconName", cat.iconName)
+                put("colorHex", cat.colorHex)
                 put("isVisible", cat.isVisible)
                 val subArr = JSONArray()
                 cat.subcategories.forEach { sub ->
@@ -4480,6 +5354,11 @@ class FinanceRepository(private val context: Context? = null) {
             put("trenBerdampinganEnabled", s.trenBerdampinganEnabled)
             put("dashboardWidgetsOrder", JSONArray(s.dashboardWidgetsOrder))
             put("hiddenDashboardWidgets", JSONArray(s.hiddenDashboardWidgets))
+            put(
+                "transactionTemplates",
+                RoomEntityMappers.serializeTransactionTemplatesArray(s.transactionTemplates)
+            )
+            put("showTemplatesAboveCategories", s.showTemplatesAboveCategories)
         }
         root.put("settings", sObj)
         root.put("selectedWalletFilter", _selectedWalletFilter.value)
@@ -4509,6 +5388,35 @@ class FinanceRepository(private val context: Context? = null) {
         root.put("totalCustomLogos", logosMap.size)
 
         return root.toString(2)
+    }
+
+    private fun mergeTransactionTemplates(
+        existing: List<com.example.data.model.TransactionTemplate>,
+        imported: List<com.example.data.model.TransactionTemplate>
+    ): List<com.example.data.model.TransactionTemplate> {
+        if (imported.isEmpty()) return existing.mapIndexed { idx, item -> item.copy(sortOrder = idx) }
+        if (existing.isEmpty()) return imported.mapIndexed { idx, item -> item.copy(sortOrder = idx) }
+        val merged = existing.toMutableList()
+        imported.forEach { imp ->
+            val impNameKey = imp.name.trim().lowercase()
+            val matchIdx = merged.indexOfFirst { ex ->
+                (imp.id.isNotBlank() && ex.id == imp.id) ||
+                    (impNameKey.isNotEmpty() &&
+                        ex.name.trim().lowercase() == impNameKey &&
+                        ex.type == imp.type)
+            }
+            if (matchIdx >= 0) {
+                val ex = merged[matchIdx]
+                merged[matchIdx] = if (imp.updatedAt >= ex.updatedAt) {
+                    imp.copy(id = ex.id.ifBlank { imp.id })
+                } else {
+                    ex
+                }
+            } else {
+                merged.add(imp)
+            }
+        }
+        return merged.mapIndexed { idx, item -> item.copy(sortOrder = idx) }
     }
 
     fun importTransactionsFromJson(
@@ -4792,6 +5700,7 @@ class FinanceRepository(private val context: Context? = null) {
                             name = co.optString("name", "Kategori"),
                             type = catType,
                             iconName = co.optString("iconName", ""),
+                            colorHex = co.optLong("colorHex", 0L),
                             isVisible = co.optBoolean("isVisible", true),
                             subcategories = subList
                         )
@@ -5134,9 +6043,22 @@ class FinanceRepository(private val context: Context? = null) {
                     trenBerdampinganEnabled = sObj.optBoolean("trenBerdampinganEnabled", true),
                     dashboardWidgetsOrder = parsedDashOrder,
                     hiddenDashboardWidgets = parsedDashHidden,
-                    hasCompletedOnboarding = sObj.optBoolean("hasCompletedOnboarding", true)
+                    hasCompletedOnboarding = sObj.optBoolean("hasCompletedOnboarding", true),
+                    transactionTemplates = RoomEntityMappers.parseTransactionTemplatesArray(
+                        sObj.optJSONArray("transactionTemplates")
+                            ?: rootObj.optJSONArray("transactionTemplates")
+                    ),
+                    showTemplatesAboveCategories = sObj.optBoolean("showTemplatesAboveCategories", false)
                 )
             } else null
+
+            val rootOnlyTemplates = if (importedSettings == null) {
+                RoomEntityMappers.parseTransactionTemplatesArray(
+                    rootObj?.optJSONArray("transactionTemplates")
+                )
+            } else {
+                emptyList()
+            }
 
             val importedFilter = rootObj?.optString("selectedWalletFilter", "") ?: ""
 
@@ -5171,6 +6093,7 @@ class FinanceRepository(private val context: Context? = null) {
                     importedRecurring.isNotEmpty() ||
                     importedScenarios.isNotEmpty() ||
                     importedSettings != null ||
+                    rootOnlyTemplates.isNotEmpty() ||
                     availableLogos.isNotEmpty()
 
             val hasValidEmptyBackupKeys = replaceExisting && rootObj != null && (
@@ -5178,6 +6101,9 @@ class FinanceRepository(private val context: Context? = null) {
                             rootObj.has("wallets") ||
                             rootObj.has("assets") ||
                             rootObj.has("debts") ||
+                            rootObj.has("categories") ||
+                            rootObj.has("settings") ||
+                            rootObj.has("transactionTemplates") ||
                             rootObj.has("savingsGoals") ||
                             rootObj.has("events") ||
                             rootObj.has("budgets") ||
@@ -5259,6 +6185,7 @@ class FinanceRepository(private val context: Context? = null) {
                 }
                 if (replaceCats) {
                     _categories.value = stampedImportedCategories
+                    com.example.util.CategoryIconHelper.updateCustomCategoryColors(stampedImportedCategories)
                     val newIds = stampedImportedCategories.map { it.id }.toSet()
                     prevCatIds.filterNot { it in newIds }.forEach { softDeleteCategoryAndSync(it, now) }
                     persistCategoriesAndSync(stampedImportedCategories, stampedImportedCategories)
@@ -5314,7 +6241,12 @@ class FinanceRepository(private val context: Context? = null) {
                     prevScenarioIds.filterNot { it in newIds }.forEach { softDeleteTimelineScenarioAndSync(it, now) }
                     persistTimelineScenariosAndSync(stampedImportedScenarios, stampedImportedScenarios)
                 }
-                _settings.value = (importedSettings ?: _settings.value).copy(hasCompletedOnboarding = true)
+                val resolvedSettings = when {
+                    importedSettings != null -> importedSettings
+                    rootOnlyTemplates.isNotEmpty() -> _settings.value.copy(transactionTemplates = rootOnlyTemplates)
+                    else -> _settings.value
+                }
+                _settings.value = resolvedSettings.copy(hasCompletedOnboarding = true)
                 if (importedFilter.isNotBlank()) _selectedWalletFilter.value = importedFilter
                 persistAppSettingsAndSync(now)
             } else {
@@ -5456,6 +6388,11 @@ class FinanceRepository(private val context: Context? = null) {
                                     name = impCat.name,
                                     type = impCat.type,
                                     iconName = impCat.iconName.ifBlank { existingCat.iconName },
+                                    colorHex = if (com.example.util.CategoryIconHelper.isExplicitCustomColor(impCat.colorHex)) {
+                                        impCat.colorHex
+                                    } else {
+                                        existingCat.colorHex
+                                    },
                                     isVisible = impCat.isVisible,
                                     subcategories = importedSubs + extraLocalSubs,
                                     updatedAt = now,
@@ -5470,6 +6407,7 @@ class FinanceRepository(private val context: Context? = null) {
                     val localOnlyCats = currentCats.filterNot { it.id in matchedExistingIds }
                     val mergedCats = importedInOrder + localOnlyCats
                     _categories.value = mergedCats
+                    com.example.util.CategoryIconHelper.updateCustomCategoryColors(mergedCats)
                     persistCategoriesAndSync(mergedCats, mergedCats)
                 }
                 // Merge Plans
@@ -5592,8 +6530,25 @@ class FinanceRepository(private val context: Context? = null) {
                     val newLabels = merged.filterNot { it.trim().lowercase() in existingLabelKeys }
                     persistLabelsAndSync(newLabels, now)
                 }
-                // Update Settings if provided and ensure onboarding is completed after restoring data
-                _settings.value = (importedSettings ?: _settings.value).copy(hasCompletedOnboarding = true)
+                // Update Settings if provided (merging transactionTemplates & showTemplatesAboveCategories cleanly)
+                val currentSettings = _settings.value
+                val mergedTemplates = mergeTransactionTemplates(
+                    existing = currentSettings.transactionTemplates,
+                    imported = importedSettings?.transactionTemplates ?: rootOnlyTemplates
+                )
+                _settings.value = if (importedSettings != null) {
+                    importedSettings.copy(
+                        hasCompletedOnboarding = true,
+                        transactionTemplates = mergedTemplates,
+                        showTemplatesAboveCategories = currentSettings.showTemplatesAboveCategories ||
+                            importedSettings.showTemplatesAboveCategories
+                    )
+                } else {
+                    currentSettings.copy(
+                        hasCompletedOnboarding = true,
+                        transactionTemplates = mergedTemplates
+                    )
+                }
                 persistAppSettingsAndSync(now)
             }
 
@@ -5625,7 +6580,11 @@ class FinanceRepository(private val context: Context? = null) {
                 IndonesianInstitutionHelper.syncWithWalletsAndAssets(_wallets.value, _assets.value)
                 IndonesianInstitutionHelper.notifyCustomLogosChanged()
             }
-            saveToDisk(ctx)
+            saveToDisk(ctx ?: getActiveContext())
+            val restoredCategoryColorCount = importedCategories.count {
+                !it.isDeleted && com.example.util.CategoryIconHelper.isExplicitCustomColor(it.colorHex)
+            }
+            val restoredTemplateCount = (importedSettings?.transactionTemplates ?: rootOnlyTemplates).size
             Result.success(
                 com.example.data.model.BackupRestoreResult(
                     transactionCount = importedTxs.size,
@@ -5638,8 +6597,10 @@ class FinanceRepository(private val context: Context? = null) {
                     recurringCount = importedRecurring.size,
                     savingsGoalCount = importedSavingsGoals.size,
                     eventCount = importedEvents.size,
-                    settingsRestored = importedSettings != null,
-                    logoCount = restoredLogoCount
+                    settingsRestored = importedSettings != null || rootOnlyTemplates.isNotEmpty(),
+                    logoCount = restoredLogoCount,
+                    customCategoryColorCount = restoredCategoryColorCount,
+                    templateCount = restoredTemplateCount
                 )
             )
         } catch (e: Exception) {

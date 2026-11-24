@@ -363,6 +363,7 @@ object FinanceStorageHelper {
                             name = co.optString("name", "Kategori"),
                             type = parseTxType(co.optString("type", "EXPENSE")),
                             iconName = co.optString("iconName", ""),
+                            colorHex = co.optLong("colorHex", 0L),
                             isVisible = co.optBoolean("isVisible", true),
                             subcategories = subList
                         )
@@ -622,7 +623,11 @@ object FinanceStorageHelper {
                     trenBerdampinganEnabled = sObj.optBoolean("trenBerdampinganEnabled", true),
                     dashboardWidgetsOrder = parsedDashOrder,
                     hiddenDashboardWidgets = parsedDashHidden,
-                    hasCompletedOnboarding = sObj.optBoolean("hasCompletedOnboarding", true)
+                    hasCompletedOnboarding = sObj.optBoolean("hasCompletedOnboarding", true),
+                    transactionTemplates = com.example.data.local.RoomEntityMappers.parseTransactionTemplatesArray(
+                        sObj.optJSONArray("transactionTemplates")
+                    ),
+                    showTemplatesAboveCategories = sObj.optBoolean("showTemplatesAboveCategories", false)
                 )
             } else {
                 defaultSettings
@@ -861,6 +866,7 @@ object FinanceStorageHelper {
                     put("name", cat.name)
                     put("type", cat.type.name)
                     put("iconName", cat.iconName)
+                    put("colorHex", cat.colorHex)
                     put("isVisible", cat.isVisible)
                     val subArr = JSONArray()
                     cat.subcategories.forEach { sub ->
@@ -1056,6 +1062,11 @@ object FinanceStorageHelper {
                 put("dashboardWidgetsOrder", JSONArray(data.settings.dashboardWidgetsOrder))
                 put("hiddenDashboardWidgets", JSONArray(data.settings.hiddenDashboardWidgets))
                 put("hasCompletedOnboarding", data.settings.hasCompletedOnboarding)
+                put(
+                    "transactionTemplates",
+                    com.example.data.local.RoomEntityMappers.serializeTransactionTemplatesArray(data.settings.transactionTemplates)
+                )
+                put("showTemplatesAboveCategories", data.settings.showTemplatesAboveCategories)
             }
             root.put("settings", sObj)
             root.put("selectedWalletFilter", data.selectedWalletFilter)

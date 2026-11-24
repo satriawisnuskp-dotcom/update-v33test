@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Assessment
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -37,6 +38,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material.icons.filled.Warning
@@ -67,6 +69,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -86,6 +89,7 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextSubtle
 import com.example.ui.theme.TextWhite
 import com.example.ui.viewmodel.FinanceViewModel
+import com.example.util.CategoryIconHelper
 import com.example.util.ImageUploadHelper
 import org.json.JSONArray
 import org.json.JSONObject
@@ -112,6 +116,7 @@ fun BackupRestoreDialog(
     val recurringTransactions by viewModel.recurringTransactions.collectAsState()
     val savingsGoals by viewModel.savingsGoals.collectAsState()
     val events by viewModel.events.collectAsState()
+    val settings by viewModel.settings.collectAsState()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     val customLogosCount = remember(wallets, assets, debts) {
@@ -127,12 +132,22 @@ fun BackupRestoreDialog(
         assets.count { it.isStock && (it.lotCount > 0 || it.averagePrice > 0) }
     }
 
+    val customCategoryColorsCount = remember(categories) {
+        categories.count { !it.isDeleted && CategoryIconHelper.isExplicitCustomColor(it.colorHex) }
+    }
+
+    val templatesCount = remember(settings.transactionTemplates) {
+        settings.transactionTemplates.size
+    }
+
     var pendingImportJson by remember { mutableStateOf<String?>(null) }
     var pendingTxCount by remember { mutableStateOf(0) }
     var pendingWalletCount by remember { mutableStateOf(0) }
     var pendingAssetCount by remember { mutableStateOf(0) }
     var pendingDebtCount by remember { mutableStateOf(0) }
     var pendingCategoryCount by remember { mutableStateOf(0) }
+    var pendingCategoryColorCount by remember { mutableStateOf(0) }
+    var pendingTemplateCount by remember { mutableStateOf(0) }
     var pendingPlanCount by remember { mutableStateOf(0) }
     var pendingBudgetCount by remember { mutableStateOf(0) }
     var pendingRecurringCount by remember { mutableStateOf(0) }
@@ -159,10 +174,12 @@ fun BackupRestoreDialog(
                 }
                 val logoNote = if (customLogosCount > 0) ", $customLogosCount logo kustom" else ""
                 val stockNote = if (stockAssetsCount > 0) ", $stockAssetsCount posisi lot & average saham" else ""
-                lastActionStatus = "Cadangan berhasil! Data transaksi, akun, aset (posisi lot & average)$logoNote, utang, kategori, perencanaan, berulang, acara, tabungan, & pengaturan tersimpan."
+                val colorNote = if (customCategoryColorsCount > 0) ", $customCategoryColorsCount warna kategori kustom" else ""
+                val templateNote = if (templatesCount > 0) ", $templatesCount template transaksi" else ""
+                lastActionStatus = "Cadangan berhasil! Data transaksi, akun, aset (posisi lot & average)$logoNote, utang, kategori$colorNote$templateNote, perencanaan, berulang, acara, tabungan, & pengaturan tersimpan."
                 Toast.makeText(
                     context,
-                    "Berhasil mencadangkan ${transactions.size} transaksi, ${wallets.size} akun, ${assets.size} aset$stockNote$logoNote, ${debts.size} utang, ${categories.size} kategori, ${recurringTransactions.size} berulang, ${events.size} acara, ${savingsGoals.size} tabungan, dan seluruh pengaturan!",
+                    "Berhasil mencadangkan ${transactions.size} transaksi, ${wallets.size} akun, ${assets.size} aset$stockNote$logoNote, ${debts.size} utang, ${categories.size} kategori$colorNote, $templatesCount template, ${recurringTransactions.size} berulang, ${events.size} acara, ${savingsGoals.size} tabungan, dan seluruh pengaturan!",
                     Toast.LENGTH_LONG
                 ).show()
             } catch (e: Exception) {
@@ -192,6 +209,8 @@ fun BackupRestoreDialog(
                 var assetCount = 0
                 var debtCount = 0
                 var catCount = 0
+                var catColorCount = 0
+                var tplCount = 0
                 var planCount = 0
                 var budgetCount = 0
                 var recurringCount = 0
@@ -208,13 +227,26 @@ fun BackupRestoreDialog(
                     walletCount = obj.optJSONArray("wallets")?.length() ?: 0
                     assetCount = obj.optJSONArray("assets")?.length() ?: 0
                     debtCount = obj.optJSONArray("debts")?.length() ?: 0
-                    catCount = obj.optJSONArray("categories")?.length() ?: 0
+                    val catArr = obj.optJSONArray("categories")
+                    catCount = catArr?.length() ?: 0
+                    if (catArr != null) {
+                        for (i in 0 until catArr.length()) {
+                            val co = catArr.getJSONObject(i)
+                            if (CategoryIconHelper.isExplicitCustomColor(co.optLong("colorHex", 0L))) {
+                                catColorCount++
+                            }
+                        }
+                    }
                     planCount = obj.optJSONArray("plannedItems")?.length() ?: 0
                     budgetCount = obj.optJSONArray("budgets")?.length() ?: 0
                     recurringCount = obj.optJSONArray("recurringTransactions")?.length() ?: 0
                     savingsCount = obj.optJSONArray("savingsGoals")?.length() ?: 0
                     eventCount = obj.optJSONArray("events")?.length() ?: 0
-                    hasSettings = obj.optJSONObject("settings") != null
+                    val sObj = obj.optJSONObject("settings")
+                    hasSettings = sObj != null
+                    tplCount = sObj?.optJSONArray("transactionTemplates")?.length()
+                        ?: obj.optJSONArray("transactionTemplates")?.length()
+                        ?: 0
 
                     val logosObj = obj.optJSONObject("customLogos")
                     val distinctLogos = mutableSetOf<String>()
@@ -243,7 +275,7 @@ fun BackupRestoreDialog(
                     logoCount = distinctLogos.size
                 }
 
-                if (txCount == 0 && walletCount == 0 && assetCount == 0 && debtCount == 0 && catCount == 0 && planCount == 0 && budgetCount == 0 && recurringCount == 0 && savingsCount == 0 && eventCount == 0 && logoCount == 0 && !hasSettings) {
+                if (txCount == 0 && walletCount == 0 && assetCount == 0 && debtCount == 0 && catCount == 0 && tplCount == 0 && planCount == 0 && budgetCount == 0 && recurringCount == 0 && savingsCount == 0 && eventCount == 0 && logoCount == 0 && !hasSettings) {
                     Toast.makeText(context, "Tidak ditemukan data keuangan yang valid dalam file JSON", Toast.LENGTH_LONG).show()
                     return@rememberLauncherForActivityResult
                 }
@@ -254,6 +286,8 @@ fun BackupRestoreDialog(
                 pendingAssetCount = assetCount
                 pendingDebtCount = debtCount
                 pendingCategoryCount = catCount
+                pendingCategoryColorCount = catColorCount
+                pendingTemplateCount = tplCount
                 pendingPlanCount = planCount
                 pendingBudgetCount = budgetCount
                 pendingRecurringCount = recurringCount
@@ -345,14 +379,17 @@ fun BackupRestoreDialog(
                             color = TextWhite
                         )
                         Text(
-                            text = "Riwayat, akun, aset, utang, kategori, rencana, berulang, acara, tabungan, & pengaturan (.json)",
+                            text = "Riwayat, akun, aset, utang, kategori & warna, template, rencana, berulang, acara, tabungan, & pengaturan (.json)",
                             fontSize = 12.sp,
                             color = TextMuted
                         )
                     }
                 }
 
-                IconButton(onClick = onDismiss) {
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.testTag("backup_close_button")
+                ) {
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Tutup",
@@ -363,9 +400,11 @@ fun BackupRestoreDialog(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Current Data Scope Card: shows all entities (transactions, wallets, assets, debts, categories, plans, budgets, settings)
+            // Current Data Scope Card: shows all entities (transactions, wallets, assets, debts, categories+colors, templates, plans, budgets, settings)
             Card(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("backup_scope_card"),
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = DarkSurface),
                 border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
@@ -505,7 +544,7 @@ fun BackupRestoreDialog(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Row 3: Acara, Tabungan, Pengaturan
+                    // Row 3: Acara, Tabungan, Template, Pengaturan
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -533,6 +572,18 @@ fun BackupRestoreDialog(
                         Surface(
                             shape = RoundedCornerShape(10.dp),
                             color = DarkSurfaceElevated,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("backup_scope_templates_tile")
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("$templatesCount", fontWeight = FontWeight.Bold, color = Color(0xFFA855F7), fontSize = 15.sp)
+                                Text("Template", fontSize = 10.sp, color = TextMuted)
+                            }
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = DarkSurfaceElevated,
                             modifier = Modifier.weight(1f)
                         ) {
                             Column(modifier = Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -542,8 +593,70 @@ fun BackupRestoreDialog(
                         }
                     }
 
-                    if (customLogosCount > 0) {
+                    if (customCategoryColorsCount > 0) {
                         Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFFF59E0B).copy(alpha = 0.12f),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.35f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("backup_custom_category_colors_badge")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Palette,
+                                    contentDescription = "Warna Kategori Kustom",
+                                    tint = Color(0xFFF59E0B),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "$customCategoryColorsCount Warna Kategori Kustom ikut dicadangkan",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = Color(0xFFFBBF24)
+                                )
+                            }
+                        }
+                    }
+
+                    if (templatesCount > 0) {
+                        Spacer(modifier = Modifier.height(if (customCategoryColorsCount > 0) 6.dp else 10.dp))
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFFA855F7).copy(alpha = 0.12f),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFA855F7).copy(alpha = 0.35f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("backup_templates_badge")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Bookmark,
+                                    contentDescription = "Template Transaksi",
+                                    tint = Color(0xFFA855F7),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "$templatesCount Template Transaksi & preferensi posisi ikut dicadangkan",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = Color(0xFFC084FC)
+                                )
+                            }
+                        }
+                    }
+
+                    if (customLogosCount > 0) {
+                        Spacer(modifier = Modifier.height(if (customCategoryColorsCount > 0 || templatesCount > 0) 6.dp else 10.dp))
                         Surface(
                             shape = RoundedCornerShape(10.dp),
                             color = Color(0xFF06B6D4).copy(alpha = 0.12f),
@@ -656,7 +769,7 @@ fun BackupRestoreDialog(
                         color = TextWhite
                     )
                     Text(
-                        text = "Mencadangkan seluruh riwayat transaksi, semua dompet & akun, aset investasi, utang piutang, transaksi berulang, acara, tabungan, anggaran, serta pengaturan ke file .json.",
+                        text = "Mencadangkan seluruh riwayat transaksi, dompet & akun, aset investasi, utang piutang, kategori & warna kustom, template transaksi, berulang, acara, tabungan, anggaran, serta pengaturan ke file .json.",
                         fontSize = 12.sp,
                         color = TextMuted,
                         modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
@@ -667,7 +780,9 @@ fun BackupRestoreDialog(
                             val defaultName = "keuangan_cadangan_lengkap_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.json"
                             exportLauncher.launch(defaultName)
                         },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("backup_export_button"),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
                     ) {
@@ -688,7 +803,9 @@ fun BackupRestoreDialog(
 
                     OutlinedButton(
                         onClick = { shareJsonFile() },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("backup_share_button"),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = TextWhite)
                     ) {
@@ -734,7 +851,7 @@ fun BackupRestoreDialog(
                         color = TextWhite
                     )
                     Text(
-                        text = "Pilih file .json cadangan untuk memulihkan transaksi, akun, aset, utang, transaksi berulang, acara, tabungan, serta pengaturan Anda.",
+                        text = "Pilih file .json cadangan untuk memulihkan transaksi, akun, aset, utang, kategori & warna kustom, template transaksi, berulang, acara, tabungan, serta pengaturan Anda.",
                         fontSize = 12.sp,
                         color = TextMuted,
                         modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
@@ -744,7 +861,9 @@ fun BackupRestoreDialog(
                         onClick = {
                             importLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
                         },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("backup_import_button"),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = IncomeGreen)
                     ) {
@@ -845,6 +964,12 @@ fun BackupRestoreDialog(
                             if (pendingCategoryCount > 0) {
                                 Text("• $pendingCategoryCount Kategori & Subkategori (Kustom)", color = Color(0xFFF59E0B), fontSize = 12.sp)
                             }
+                            if (pendingCategoryColorCount > 0) {
+                                Text("• $pendingCategoryColorCount Warna Kategori Kustom", color = Color(0xFFFBBF24), fontSize = 12.sp)
+                            }
+                            if (pendingTemplateCount > 0) {
+                                Text("• $pendingTemplateCount Template Transaksi", color = Color(0xFFC084FC), fontSize = 12.sp)
+                            }
                             if (pendingPlanCount > 0) {
                                 Text("• $pendingPlanCount Pos Perencanaan Keuangan", color = Color(0xFF8B5CF6), fontSize = 12.sp)
                             }
@@ -907,7 +1032,7 @@ fun BackupRestoreDialog(
                                     color = TextWhite
                                 )
                                 Text(
-                                    text = "Menambahkan riwayat, akun, aset, utang, berulang, acara, tabungan, kategori, & perencanaan baru tanpa menghapus data yang ada.",
+                                    text = "Menambahkan riwayat, akun, aset, utang, berulang, acara, tabungan, kategori & warna kustom, template transaksi, & perencanaan baru tanpa menghapus data yang ada.",
                                     fontSize = 11.sp,
                                     color = TextMuted
                                 )
@@ -988,6 +1113,8 @@ fun BackupRestoreDialog(
                                 if (summary.debtCount > 0) details.add("${summary.debtCount} utang")
                                 if (summary.logoCount > 0) details.add("${summary.logoCount} logo akun/aset")
                                 if (summary.categoryCount > 0) details.add("${summary.categoryCount} kategori")
+                                if (summary.customCategoryColorCount > 0) details.add("${summary.customCategoryColorCount} warna kategori")
+                                if (summary.templateCount > 0) details.add("${summary.templateCount} template")
                                 if (summary.planCount > 0) details.add("${summary.planCount} rencana")
                                 if (summary.budgetCount > 0) details.add("${summary.budgetCount} anggaran")
                                 if (summary.recurringCount > 0) details.add("${summary.recurringCount} berulang")
@@ -1005,6 +1132,7 @@ fun BackupRestoreDialog(
                         showImportConfirmDialog = false
                         pendingImportJson = null
                     },
+                    modifier = Modifier.testTag("backup_confirm_restore_button"),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (replaceExistingChoice) ExpenseRed else IncomeGreen
                     )

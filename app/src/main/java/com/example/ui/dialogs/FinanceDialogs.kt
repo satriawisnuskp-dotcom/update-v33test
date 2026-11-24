@@ -1,6 +1,8 @@
 package com.example.ui.dialogs
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -75,11 +77,14 @@ import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowDropUp
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.Category
 import androidx.compose.material.icons.filled.Celebration
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.Edit
@@ -160,6 +165,7 @@ import com.example.data.model.DebtType
 import com.example.data.model.MainCategory
 import com.example.data.model.SubcategoryItem
 import com.example.data.model.Transaction
+import com.example.data.model.TransactionTemplate
 import com.example.data.model.TransactionType
 import com.example.ui.theme.AccentBlue
 import com.example.ui.theme.DarkBackground
@@ -204,6 +210,13 @@ fun AddTransactionDialog(
     initialNote: String = "",
     initialSubcategory: String = "",
     initialRecurrence: String = "Tidak pernah",
+    initialTransferFee: Double = 0.0,
+    initialTargetAssetId: String = "",
+    initialTargetAssetName: String = "",
+    initialTargetDebtId: String = "",
+    initialTargetDebtName: String = "",
+    initialType: TransactionType? = null,
+    isCopyMode: Boolean = false,
     onTransactionSaved: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
@@ -216,6 +229,7 @@ fun AddTransactionDialog(
     val allCategories by viewModel.categories.collectAsState()
     val allTransactions by viewModel.allTransactions.collectAsState()
     val selectedWalletFilter by viewModel.selectedWalletFilter.collectAsState()
+    val settings by viewModel.settings.collectAsState()
 
     val currentLocalTime = remember {
         SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
@@ -239,7 +253,8 @@ fun AddTransactionDialog(
     }
     var selectedCategory by remember { mutableStateOf(initialCategory) }
     var selectedSubcategory by remember { mutableStateOf(initialSubcategory) }
-    var isCategoryChosen by remember { mutableStateOf(initialCategory != "Other") }
+    var preferredTxType by remember { mutableStateOf(initialType) }
+    var isCategoryChosen by remember { mutableStateOf(isCopyMode || initialCategory != "Other") }
     var showSubcategoryDropdown by remember { mutableStateOf(false) }
 
     // Otomatis arahkan akun default ke akun yang dipilih di pojok kanan atas
@@ -263,14 +278,36 @@ fun AddTransactionDialog(
             ?: wallets.getOrNull(1)?.name ?: ""
         mutableStateOf(dest)
     }
-    var hasTransferFee by remember { mutableStateOf(false) }
-    var transferFeeText by remember { mutableStateOf("") }
-    var selectedAsset by remember(assets) { mutableStateOf(assets.firstOrNull()) }
+    var hasTransferFee by remember { mutableStateOf(initialTransferFee > 0.0) }
+    var transferFeeText by remember {
+        mutableStateOf(
+            if (initialTransferFee > 0.0) {
+                if (initialTransferFee % 1.0 == 0.0) initialTransferFee.toLong().toString() else initialTransferFee.toString()
+            } else ""
+        )
+    }
+    var selectedAsset by remember(assets, initialTargetAssetId, initialTargetAssetName) {
+        val matched = if (initialTargetAssetId.isNotBlank() || initialTargetAssetName.isNotBlank()) {
+            assets.firstOrNull {
+                (initialTargetAssetId.isNotBlank() && it.id == initialTargetAssetId) ||
+                    (initialTargetAssetName.isNotBlank() && it.name.equals(initialTargetAssetName, ignoreCase = true))
+            }
+        } else null
+        mutableStateOf(matched ?: assets.firstOrNull())
+    }
     var isAssetDropdownExpanded by remember { mutableStateOf(false) }
-    var selectedDebt by remember(debts) { mutableStateOf(debts.firstOrNull { it.type == DebtType.BORROWED } ?: debts.firstOrNull()) }
+    var selectedDebt by remember(debts, initialTargetDebtId, initialTargetDebtName) {
+        val matched = if (initialTargetDebtId.isNotBlank() || initialTargetDebtName.isNotBlank()) {
+            debts.firstOrNull {
+                (initialTargetDebtId.isNotBlank() && it.id == initialTargetDebtId) ||
+                    (initialTargetDebtName.isNotBlank() && it.name.equals(initialTargetDebtName, ignoreCase = true))
+            }
+        } else null
+        mutableStateOf(matched ?: debts.firstOrNull { it.type == DebtType.BORROWED } ?: debts.firstOrNull())
+    }
     var showDebtPicker by remember { mutableStateOf(false) }
 
-    var selectedCurrency by remember { mutableStateOf("IDR") }
+    var selectedCurrency by remember { mutableStateOf(settings.primaryCurrency.ifBlank { "IDR" }) }
     var selectedDayOfMonth by remember { mutableIntStateOf(currentRealDay) }
     var selectedMonthIndex by remember { mutableIntStateOf(currentRealMonth) }
     var selectedYear by remember { mutableIntStateOf(currentRealYear) }
@@ -280,9 +317,25 @@ fun AddTransactionDialog(
     var selectedRecurrence by remember { mutableStateOf(initialRecurrence) }
     var noteText by remember { mutableStateOf(initialNote) }
     var isNoteDropdownExpanded by remember { mutableStateOf(false) }
-    var selectedLabels by remember { mutableStateOf(if (initialLabel.isNotBlank()) setOf(initialLabel) else setOf<String>()) }
+    var selectedLabels by remember {
+        mutableStateOf(
+            initialLabel.split(",")
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .toSet()
+        )
+    }
 
-    var showCategoryPicker by remember { mutableStateOf(false) }
+    var showCategoryPicker by remember {
+        mutableStateOf(!isCopyMode && initialCategory == "Other" && initialAmount <= 0.0 && initialSubcategory.isBlank())
+    }
+    var showTemplatePickerSheet by remember { mutableStateOf(false) }
+    var showSaveTemplateSheet by remember { mutableStateOf(false) }
+    var showManageCategoriesDialog by remember { mutableStateOf(false) }
+    var statusBannerMessage by remember {
+        mutableStateOf(if (isCopyMode) "Salinan siap. Ubah yang berbeda, lalu simpan." else null)
+    }
+
     var showSourceAccountPicker by remember { mutableStateOf(false) }
     var showTargetAccountPicker by remember { mutableStateOf(false) }
     var showAssetPicker by remember { mutableStateOf(false) }
@@ -306,6 +359,71 @@ fun AddTransactionDialog(
             selectedCategory.equals("Aset", ignoreCase = true) ||
             selectedCategory.equals("Transfer Aset", ignoreCase = true)
 
+    val resolvedTxType = when {
+        isTransferType -> TransactionType.TRANSFER
+        preferredTxType == TransactionType.INCOME -> TransactionType.INCOME
+        allCategories.any { !it.isDeleted && it.type == TransactionType.INCOME && it.name.equals(selectedCategory, ignoreCase = true) } -> TransactionType.INCOME
+        allCategories.any { !it.isDeleted && it.type == TransactionType.EXPENSE && it.name.equals(selectedCategory, ignoreCase = true) } -> TransactionType.EXPENSE
+        selectedCategory in listOf("Salary", "Extra Income", "Bonus", "Investasi", "Pemberian", "Gaji", "Pendapatan", "Dividen", "Hadiah") -> TransactionType.INCOME
+        else -> preferredTxType ?: TransactionType.EXPENSE
+    }
+
+    val matchedCategoryObj = remember(allCategories, selectedCategory, resolvedTxType) {
+        allCategories.firstOrNull { !it.isDeleted && it.type == resolvedTxType && it.name.equals(selectedCategory, ignoreCase = true) }
+            ?: allCategories.firstOrNull { !it.isDeleted && it.name.equals(selectedCategory, ignoreCase = true) }
+    }
+    val categoryAccentColor = remember(matchedCategoryObj, selectedCategory, resolvedTxType, isDebtPayment, isAssetTransfer, isTransferType) {
+        when {
+            isDebtPayment -> Color(0xFFFF5722)
+            isAssetTransfer -> Color(0xFF059669)
+            isTransferType -> Color(0xFF0284C7)
+            else -> CategoryIconHelper.resolveCategoryColor(matchedCategoryObj, selectedCategory, resolvedTxType)
+        }
+    }
+
+    val applyTemplateToAddForm: (TransactionTemplate) -> Unit = { tpl ->
+        selectedCategory = tpl.category
+        selectedSubcategory = tpl.subcategory
+        preferredTxType = tpl.type
+        isCategoryChosen = true
+        amountText = if (tpl.rememberAmount && tpl.amount > 0.0) {
+            if (tpl.amount % 1.0 == 0.0) tpl.amount.toLong().toString() else tpl.amount.toString()
+        } else {
+            ""
+        }
+        if (tpl.accountName.isNotBlank()) {
+            selectedWallet = wallets.firstOrNull { it.name.equals(tpl.accountName, ignoreCase = true) }?.name ?: tpl.accountName
+        }
+        if (tpl.toAccountName.isNotBlank()) {
+            selectedTargetWallet = wallets.firstOrNull { it.name.equals(tpl.toAccountName, ignoreCase = true) }?.name ?: tpl.toAccountName
+        }
+        hasTransferFee = tpl.transferFee > 0.0
+        transferFeeText = if (tpl.transferFee > 0.0) {
+            if (tpl.transferFee % 1.0 == 0.0) tpl.transferFee.toLong().toString() else tpl.transferFee.toString()
+        } else {
+            ""
+        }
+        if (tpl.targetAssetId.isNotBlank() || tpl.targetAssetName.isNotBlank()) {
+            selectedAsset = assets.firstOrNull {
+                (tpl.targetAssetId.isNotBlank() && it.id == tpl.targetAssetId) ||
+                    (tpl.targetAssetName.isNotBlank() && it.name.equals(tpl.targetAssetName, ignoreCase = true))
+            } ?: selectedAsset
+        }
+        if (tpl.targetDebtId.isNotBlank() || tpl.targetDebtName.isNotBlank()) {
+            selectedDebt = debts.firstOrNull {
+                (tpl.targetDebtId.isNotBlank() && it.id == tpl.targetDebtId) ||
+                    (tpl.targetDebtName.isNotBlank() && it.name.equals(tpl.targetDebtName, ignoreCase = true))
+            } ?: selectedDebt
+        }
+        noteText = tpl.note
+        selectedLabels = tpl.label.split(",").map { it.trim() }.filter { it.isNotBlank() }.toSet()
+        selectedRecurrence = tpl.recurrence.ifBlank { "Tidak pernah" }
+        selectedCurrency = tpl.currency.ifBlank { "IDR" }
+        showCategoryPicker = false
+        showTemplatePickerSheet = false
+        statusBannerMessage = "Template \"${tpl.name}\" diterapkan"
+    }
+
     val executeSave = {
         if (!isCategoryChosen && !isTransferType) {
             showCategoryPicker = true
@@ -317,13 +435,6 @@ fun AddTransactionDialog(
             } else {
                 val rawFee = if (hasTransferFee) (transferFeeText.toDoubleOrNull() ?: 0.0) else 0.0
                 val fee = TransactionMathHelper.sanitizeAmount(rawFee)
-                val txType = when {
-                    isTransferType -> TransactionType.TRANSFER
-                    allCategories.any { it.type == TransactionType.INCOME && it.name.equals(selectedCategory, ignoreCase = true) } -> TransactionType.INCOME
-                    allCategories.any { it.type == TransactionType.EXPENSE && it.name.equals(selectedCategory, ignoreCase = true) } -> TransactionType.EXPENSE
-                    selectedCategory in listOf("Salary", "Extra Income", "Bonus", "Investasi", "Pemberian", "Gaji", "Pendapatan", "Dividen", "Hadiah") -> TransactionType.INCOME
-                    else -> TransactionType.EXPENSE
-                }
                 val defaultTitle = when {
                     isDebtPayment -> "Bayar Utang ${selectedDebt?.name ?: ""}"
                     isAssetTransfer -> "Transfer ke ${selectedAsset?.name ?: "Aset"}"
@@ -336,7 +447,7 @@ fun AddTransactionDialog(
                         category = if (isDebtPayment) "Pembayaran Utang" else if (isAssetTransfer) "Asset" else if (isTransferType) "Transfer" else selectedCategory,
                         subcategory = selectedSubcategory,
                         amount = amt,
-                        type = txType,
+                        type = resolvedTxType,
                         accountName = selectedWallet,
                         dayOfMonth = selectedDayOfMonth,
                         monthIndex = selectedMonthIndex,
@@ -425,12 +536,16 @@ fun AddTransactionDialog(
                     .padding(innerPadding)
                     .verticalScroll(rememberScrollState())
             ) {
-                // 1. Top Header (Teal/Emerald or Blue for transfer)
-                val headerColor = when {
-                    isTransferType -> Color(0xFF0284C7)
-                    selectedCategory in listOf("Salary", "Extra Income", "Bonus", "Investasi", "Pemberian") -> Color(0xFF059669)
-                    else -> Color(0xFF009688)
+                // 1. Top Header — dynamic category color matching selected category
+                val targetHeaderColor = when {
+                    !isCategoryChosen && !isTransferType -> Color(0xFF009688)
+                    else -> CategoryIconHelper.headerColorForCategory(categoryAccentColor)
                 }
+                val headerColor by animateColorAsState(
+                    targetValue = targetHeaderColor,
+                    animationSpec = tween(durationMillis = 280),
+                    label = "add_tx_header_color"
+                )
 
                 Box(
                     modifier = Modifier
@@ -438,9 +553,10 @@ fun AddTransactionDialog(
                         .background(headerColor)
                         .fullScreenTopSafePadding()
                         .padding(bottom = 18.dp)
+                        .testTag("add_tx_amount_header")
                 ) {
                     Column(modifier = Modifier.fillMaxWidth()) {
-                        // Header bar: [X] Tambah transaksi / Transfer & [✓ Simpan]
+                        // Header bar: [X] Tambah <Category> & [Bookmark]
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -448,7 +564,10 @@ fun AddTransactionDialog(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
                                 IconButton(onClick = onDismiss) {
                                     Icon(
                                         imageVector = Icons.Default.Close,
@@ -463,12 +582,28 @@ fun AddTransactionDialog(
                                         isDebtPayment -> "Bayar Utang"
                                         isAssetTransfer -> "Transfer Aset"
                                         isTransferType -> "Transfer Antar Akun"
+                                        isCategoryChosen -> "Tambah $selectedCategory"
                                         else -> "Tambah transaksi"
                                     },
                                     fontSize = 18.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = Color.White
+                                    color = Color.White,
+                                    maxLines = 1
                                 )
+                            }
+
+                            if (isCategoryChosen || isTransferType) {
+                                IconButton(
+                                    onClick = { showSaveTemplateSheet = true },
+                                    modifier = Modifier.testTag("btn_add_save_template")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.BookmarkBorder,
+                                        contentDescription = "Simpan sebagai template",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(23.dp)
+                                    )
+                                }
                             }
                         }
 
@@ -569,6 +704,54 @@ fun AddTransactionDialog(
                                         modifier = Modifier.size(18.dp)
                                     )
                                 }
+                            }
+                        }
+                    }
+                }
+
+                statusBannerMessage?.let { msg ->
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = DarkSurfaceElevated,
+                        border = BorderStroke(1.dp, AccentBlue.copy(alpha = 0.45f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 10.dp)
+                            .testTag("add_tx_status_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Bookmark,
+                                    contentDescription = null,
+                                    tint = AccentBlue,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = msg,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = TextWhite
+                                )
+                            }
+                            IconButton(
+                                onClick = { statusBannerMessage = null },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Tutup pesan",
+                                    tint = TextMuted,
+                                    modifier = Modifier.size(14.dp)
+                                )
                             }
                         }
                     }
@@ -1474,14 +1657,21 @@ fun AddTransactionDialog(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Icon(
-                                        imageVector = getCategoryIcon(selectedCategory),
+                                        imageVector = CategoryIconHelper.getCategoryIcon(
+                                            selectedSubcategory.ifBlank { selectedCategory },
+                                            matchedCategoryObj?.iconName ?: ""
+                                        ),
                                         contentDescription = null,
-                                        tint = AccentBlue,
+                                        tint = categoryAccentColor,
                                         modifier = Modifier.size(16.dp)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = selectedCategory,
+                                        text = if (selectedSubcategory.isNotBlank()) {
+                                            "$selectedCategory · $selectedSubcategory"
+                                        } else {
+                                            selectedCategory
+                                        },
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Medium,
                                         color = TextWhite
@@ -1929,23 +2119,84 @@ fun AddTransactionDialog(
 
     // Sub-dialogs
     if (showCategoryPicker) {
-        CategoryPickerSubDialog(
+        TransactionCategoryPickerSheet(
             currentCategory = selectedCategory,
             currentSubcategory = selectedSubcategory,
             categories = allCategories,
-            onCategorySelected = {
-                selectedCategory = it
-                selectedSubcategory = ""
-                isCategoryChosen = true
-                showCategoryPicker = false
-            },
+            templates = settings.transactionTemplates,
+            showTemplatesAboveCategories = settings.showTemplatesAboveCategories,
             onCategoryAndSubcategorySelected = { cat, subcat ->
                 selectedCategory = cat
                 selectedSubcategory = subcat
+                preferredTxType = allCategories.firstOrNull {
+                    !it.isDeleted && it.name.equals(cat, ignoreCase = true)
+                }?.type
                 isCategoryChosen = true
                 showCategoryPicker = false
             },
+            onSelectTemplate = applyTemplateToAddForm,
+            onOpenTemplatesSheet = { showTemplatePickerSheet = true },
+            onOpenManageCategories = { showManageCategoriesDialog = true },
             onDismiss = { showCategoryPicker = false }
+        )
+    }
+
+    if (showTemplatePickerSheet) {
+        TemplatePickerSheet(
+            templates = settings.transactionTemplates,
+            categories = allCategories,
+            isManageMode = false,
+            onSelectTemplate = applyTemplateToAddForm,
+            onRenameTemplate = { id, newName ->
+                viewModel.renameTransactionTemplate(id, newName)
+                Toast.makeText(context, "Nama template diperbarui", Toast.LENGTH_SHORT).show()
+            },
+            onDeleteTemplate = { id ->
+                viewModel.deleteTransactionTemplate(id)
+                Toast.makeText(context, "Template dihapus", Toast.LENGTH_SHORT).show()
+            },
+            onReorderTemplates = { reordered ->
+                viewModel.reorderTransactionTemplates(reordered)
+            },
+            onDismiss = { showTemplatePickerSheet = false }
+        )
+    }
+
+    if (showSaveTemplateSheet) {
+        val rawAmt = TransactionMathHelper.sanitizeAmount(amountText.toDoubleOrNull() ?: 0.0)
+        val rawFee = if (hasTransferFee) TransactionMathHelper.sanitizeAmount(transferFeeText.toDoubleOrNull() ?: 0.0) else 0.0
+        SaveTransactionTemplateSheet(
+            initialName = noteText.trim().ifBlank { selectedSubcategory.ifBlank { selectedCategory } },
+            category = if (isDebtPayment) "Pembayaran Utang" else if (isAssetTransfer) "Asset" else if (isTransferType) "Transfer" else selectedCategory,
+            subcategory = selectedSubcategory,
+            amount = rawAmt,
+            type = resolvedTxType,
+            accountName = selectedWallet,
+            toAccountName = if (isDebtPayment) (selectedDebt?.name ?: "") else if (isTransferType && !isAssetTransfer) selectedTargetWallet else "",
+            transferFee = rawFee,
+            targetAssetId = if (isAssetTransfer) (selectedAsset?.id ?: "") else "",
+            targetAssetName = if (isAssetTransfer) (selectedAsset?.name ?: "") else "",
+            targetDebtId = if (isDebtPayment) (selectedDebt?.id ?: "") else "",
+            targetDebtName = if (isDebtPayment) (selectedDebt?.name ?: "") else "",
+            note = noteText,
+            label = selectedLabels.joinToString(", "),
+            recurrence = selectedRecurrence,
+            currency = selectedCurrency,
+            categories = allCategories,
+            onSave = { tpl ->
+                viewModel.saveTransactionTemplate(tpl)
+                showSaveTemplateSheet = false
+                statusBannerMessage = "Disimpan ke template"
+                Toast.makeText(context, "Disimpan ke template", Toast.LENGTH_SHORT).show()
+            },
+            onDismiss = { showSaveTemplateSheet = false }
+        )
+    }
+
+    if (showManageCategoriesDialog) {
+        ManageCategoriesDialog(
+            viewModel = viewModel,
+            onDismiss = { showManageCategoriesDialog = false }
         )
     }
 
@@ -2129,6 +2380,7 @@ fun AddTransactionDialog(
 fun EditTransactionDialog(
     transaction: Transaction,
     viewModel: FinanceViewModel,
+    onCopyTransaction: ((Transaction) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     FullScreenModalContainer(onDismissRequest = onDismiss) {
@@ -2137,6 +2389,7 @@ fun EditTransactionDialog(
     val availableLabels by viewModel.labels.collectAsState()
     val allCategories by viewModel.categories.collectAsState()
     val allTransactions by viewModel.allTransactions.collectAsState()
+    val settings by viewModel.settings.collectAsState()
 
     val formattedInitialAmount = remember(transaction) {
         if (transaction.amount % 1.0 == 0.0) {
@@ -2149,6 +2402,7 @@ fun EditTransactionDialog(
     var amountText by remember { mutableStateOf(formattedInitialAmount) }
     var selectedCategory by remember { mutableStateOf(transaction.category) }
     var selectedSubcategory by remember { mutableStateOf(transaction.subcategory) }
+    var preferredTxType by remember { mutableStateOf<TransactionType?>(transaction.type) }
     var showSubcategoryDropdown by remember { mutableStateOf(false) }
     var selectedWallet by remember { mutableStateOf(transaction.accountName) }
     var selectedTargetWallet by remember(transaction, wallets) {
@@ -2177,6 +2431,7 @@ fun EditTransactionDialog(
     }
     var showDebtPicker by remember { mutableStateOf(false) }
 
+    var selectedCurrency by remember { mutableStateOf(settings.primaryCurrency.ifBlank { "IDR" }) }
     var selectedDayOfMonth by remember { mutableIntStateOf(transaction.dayOfMonth) }
     var selectedMonthIndex by remember { mutableIntStateOf(transaction.monthIndex) }
     var selectedYear by remember { mutableIntStateOf(transaction.year) }
@@ -2198,6 +2453,11 @@ fun EditTransactionDialog(
     }
 
     var showCategoryPicker by remember { mutableStateOf(false) }
+    var showTemplatePickerSheet by remember { mutableStateOf(false) }
+    var showSaveTemplateSheet by remember { mutableStateOf(false) }
+    var showManageCategoriesDialog by remember { mutableStateOf(false) }
+    var statusBannerMessage by remember { mutableStateOf<String?>(null) }
+
     var showSourceAccountPicker by remember { mutableStateOf(false) }
     var showTargetAccountPicker by remember { mutableStateOf(false) }
     var showAssetPicker by remember { mutableStateOf(false) }
@@ -2210,8 +2470,8 @@ fun EditTransactionDialog(
     val context = LocalContext.current
     val isDebtPayment = selectedCategory.equals("Pembayaran Utang", ignoreCase = true) ||
             selectedCategory.equals("Bayar Utang", ignoreCase = true) ||
-            transaction.targetDebtId.isNotBlank() ||
-            transaction.targetDebtName.isNotBlank()
+            (selectedCategory.equals(transaction.category, ignoreCase = true) &&
+                (transaction.targetDebtId.isNotBlank() || transaction.targetDebtName.isNotBlank()))
 
     val isTransferType = selectedCategory.equals("Transfer", ignoreCase = true) ||
             selectedCategory.equals("Transfer Antar Bank", ignoreCase = true) ||
@@ -2224,53 +2484,109 @@ fun EditTransactionDialog(
             selectedCategory.equals("Aset", ignoreCase = true) ||
             selectedCategory.equals("Transfer Aset", ignoreCase = true)
 
+    val resolvedTxType = when {
+        isTransferType -> TransactionType.TRANSFER
+        allCategories.any { !it.isDeleted && it.type == TransactionType.INCOME && it.name.equals(selectedCategory, ignoreCase = true) } -> TransactionType.INCOME
+        allCategories.any { !it.isDeleted && it.type == TransactionType.EXPENSE && it.name.equals(selectedCategory, ignoreCase = true) } -> TransactionType.EXPENSE
+        selectedCategory in listOf("Salary", "Extra Income", "Bonus", "Investasi", "Pemberian", "Gaji", "Pendapatan", "Dividen", "Hadiah") -> TransactionType.INCOME
+        selectedCategory in listOf("Other", "Bills & Fees", "Market", "Food & Dining", "Shopping", "Transport", "Kesehatan", "Pendidikan", "Hiburan") -> TransactionType.EXPENSE
+        transaction.category.equals(selectedCategory, ignoreCase = true) -> transaction.type
+        else -> preferredTxType ?: TransactionType.EXPENSE
+    }
+
+    val matchedCategoryObj = remember(allCategories, selectedCategory, resolvedTxType) {
+        allCategories.firstOrNull { !it.isDeleted && it.type == resolvedTxType && it.name.equals(selectedCategory, ignoreCase = true) }
+            ?: allCategories.firstOrNull { !it.isDeleted && it.name.equals(selectedCategory, ignoreCase = true) }
+    }
+    val categoryAccentColor = remember(matchedCategoryObj, selectedCategory, resolvedTxType, isDebtPayment, isAssetTransfer, isTransferType) {
+        when {
+            isDebtPayment -> Color(0xFFFF5722)
+            isAssetTransfer -> Color(0xFF059669)
+            isTransferType -> Color(0xFF0284C7)
+            else -> CategoryIconHelper.resolveCategoryColor(matchedCategoryObj, selectedCategory, resolvedTxType)
+        }
+    }
+
+    val buildCurrentSnapshot: () -> Transaction = {
+        val rawAmt = amountText.toDoubleOrNull() ?: transaction.amount
+        val amt = TransactionMathHelper.sanitizeAmount(rawAmt)
+        val rawFee = if (hasTransferFee) (transferFeeText.toDoubleOrNull() ?: 0.0) else 0.0
+        val fee = TransactionMathHelper.sanitizeAmount(rawFee)
+        val defaultTitle = when {
+            isDebtPayment -> "Bayar Utang ${selectedDebt?.name ?: ""}"
+            isAssetTransfer -> "Transfer ke ${selectedAsset?.name ?: "Aset"}"
+            isTransferType -> "Transfer ke $selectedTargetWallet"
+            else -> selectedCategory
+        }
+        transaction.copy(
+            title = if (noteText.isNotBlank()) noteText else defaultTitle,
+            category = if (isDebtPayment) "Pembayaran Utang" else if (isAssetTransfer) "Asset" else if (isTransferType) "Transfer" else selectedCategory,
+            subcategory = selectedSubcategory,
+            amount = amt,
+            type = resolvedTxType,
+            accountName = selectedWallet,
+            dayOfMonth = selectedDayOfMonth,
+            monthIndex = selectedMonthIndex,
+            year = selectedYear,
+            dayOfWeekName = selectedDayOfWeek,
+            note = noteText,
+            label = selectedLabels.joinToString(", "),
+            recurrence = selectedRecurrence,
+            time = selectedTime,
+            toAccountName = if (isDebtPayment) (selectedDebt?.name ?: "") else if (isTransferType && !isAssetTransfer) selectedTargetWallet else "",
+            transferFee = fee,
+            targetAssetId = if (isAssetTransfer) (selectedAsset?.id ?: "") else "",
+            targetAssetName = if (isAssetTransfer) (selectedAsset?.name ?: "") else "",
+            targetDebtId = if (isDebtPayment) (selectedDebt?.id ?: "") else "",
+            targetDebtName = if (isDebtPayment) (selectedDebt?.name ?: "") else ""
+        )
+    }
+
+    val applyTemplateToEditForm: (TransactionTemplate) -> Unit = { tpl ->
+        selectedCategory = tpl.category
+        selectedSubcategory = tpl.subcategory
+        preferredTxType = tpl.type
+        if (tpl.rememberAmount && tpl.amount > 0.0) {
+            amountText = if (tpl.amount % 1.0 == 0.0) tpl.amount.toLong().toString() else tpl.amount.toString()
+        }
+        if (tpl.accountName.isNotBlank()) {
+            selectedWallet = wallets.firstOrNull { it.name.equals(tpl.accountName, ignoreCase = true) }?.name ?: tpl.accountName
+        }
+        if (tpl.toAccountName.isNotBlank()) {
+            selectedTargetWallet = wallets.firstOrNull { it.name.equals(tpl.toAccountName, ignoreCase = true) }?.name ?: tpl.toAccountName
+        }
+        hasTransferFee = tpl.transferFee > 0.0
+        transferFeeText = if (tpl.transferFee > 0.0) {
+            if (tpl.transferFee % 1.0 == 0.0) tpl.transferFee.toLong().toString() else tpl.transferFee.toString()
+        } else ""
+        if (tpl.targetAssetId.isNotBlank() || tpl.targetAssetName.isNotBlank()) {
+            selectedAsset = assets.firstOrNull {
+                (tpl.targetAssetId.isNotBlank() && it.id == tpl.targetAssetId) ||
+                    (tpl.targetAssetName.isNotBlank() && it.name.equals(tpl.targetAssetName, ignoreCase = true))
+            } ?: selectedAsset
+        }
+        if (tpl.targetDebtId.isNotBlank() || tpl.targetDebtName.isNotBlank()) {
+            selectedDebt = debts.firstOrNull {
+                (tpl.targetDebtId.isNotBlank() && it.id == tpl.targetDebtId) ||
+                    (tpl.targetDebtName.isNotBlank() && it.name.equals(tpl.targetDebtName, ignoreCase = true))
+            } ?: selectedDebt
+        }
+        noteText = tpl.note
+        selectedLabels = tpl.label.split(",").map { it.trim() }.filter { it.isNotBlank() }.toSet()
+        selectedRecurrence = tpl.recurrence.ifBlank { "Tidak pernah" }
+        selectedCurrency = tpl.currency.ifBlank { "IDR" }
+        showCategoryPicker = false
+        showTemplatePickerSheet = false
+        statusBannerMessage = "Template \"${tpl.name}\" diterapkan"
+    }
+
     val executeSaveEdit = {
         val rawAmt = amountText.toDoubleOrNull() ?: 0.0
         val amt = TransactionMathHelper.sanitizeAmount(rawAmt)
         if (amt <= 0.0) {
             Toast.makeText(context, "Masukkan nominal transaksi terlebih dahulu", Toast.LENGTH_SHORT).show()
         } else {
-            val rawFee = if (hasTransferFee) (transferFeeText.toDoubleOrNull() ?: 0.0) else 0.0
-            val fee = TransactionMathHelper.sanitizeAmount(rawFee)
-            val txType = when {
-                isTransferType -> TransactionType.TRANSFER
-                allCategories.any { it.type == TransactionType.INCOME && it.name.equals(selectedCategory, ignoreCase = true) } -> TransactionType.INCOME
-                allCategories.any { it.type == TransactionType.EXPENSE && it.name.equals(selectedCategory, ignoreCase = true) } -> TransactionType.EXPENSE
-                selectedCategory in listOf("Salary", "Extra Income", "Bonus", "Investasi", "Pemberian", "Gaji", "Pendapatan", "Dividen", "Hadiah") -> TransactionType.INCOME
-                selectedCategory in listOf("Other", "Bills & Fees", "Market", "Food & Dining", "Shopping", "Transport", "Kesehatan", "Pendidikan", "Hiburan") -> TransactionType.EXPENSE
-                transaction.category.equals(selectedCategory, ignoreCase = true) -> transaction.type
-                else -> TransactionType.EXPENSE
-            }
-            val defaultTitle = when {
-                isDebtPayment -> "Bayar Utang ${selectedDebt?.name ?: ""}"
-                isAssetTransfer -> "Transfer ke ${selectedAsset?.name ?: "Aset"}"
-                isTransferType -> "Transfer ke $selectedTargetWallet"
-                else -> selectedCategory
-            }
-            viewModel.updateTransaction(
-                transaction.copy(
-                    title = if (noteText.isNotBlank()) noteText else defaultTitle,
-                    category = if (isDebtPayment) "Pembayaran Utang" else if (isAssetTransfer) "Asset" else if (isTransferType) "Transfer" else selectedCategory,
-                    subcategory = selectedSubcategory,
-                    amount = amt,
-                    type = txType,
-                    accountName = selectedWallet,
-                    dayOfMonth = selectedDayOfMonth,
-                    monthIndex = selectedMonthIndex,
-                    year = selectedYear,
-                    dayOfWeekName = selectedDayOfWeek,
-                    note = noteText,
-                    label = selectedLabels.joinToString(", "),
-                    recurrence = selectedRecurrence,
-                    time = selectedTime,
-                    toAccountName = if (isDebtPayment) (selectedDebt?.name ?: "") else if (isTransferType && !isAssetTransfer) selectedTargetWallet else "",
-                    transferFee = fee,
-                    targetAssetId = if (isAssetTransfer) (selectedAsset?.id ?: "") else "",
-                    targetAssetName = if (isAssetTransfer) (selectedAsset?.name ?: "") else "",
-                    targetDebtId = if (isDebtPayment) (selectedDebt?.id ?: "") else "",
-                    targetDebtName = if (isDebtPayment) (selectedDebt?.name ?: "") else ""
-                )
-            )
+            viewModel.updateTransaction(buildCurrentSnapshot())
             onDismiss()
         }
     }
@@ -2338,12 +2654,12 @@ fun EditTransactionDialog(
                     .padding(innerPadding)
                     .verticalScroll(rememberScrollState())
             ) {
-                // Header (Teal/Emerald or Blue for transfer)
-                val headerColor = when {
-                    isTransferType -> Color(0xFF0284C7)
-                    selectedCategory in listOf("Salary", "Extra Income", "Bonus", "Investasi", "Pemberian") -> Color(0xFF059669)
-                    else -> Color(0xFF0D9488)
-                }
+                // Header — dynamic category color matching selected category
+                val headerColor by animateColorAsState(
+                    targetValue = CategoryIconHelper.headerColorForCategory(categoryAccentColor),
+                    animationSpec = tween(durationMillis = 280),
+                    label = "edit_tx_header_color"
+                )
 
                 Box(
                     modifier = Modifier
@@ -2351,6 +2667,7 @@ fun EditTransactionDialog(
                         .background(headerColor)
                         .fullScreenTopSafePadding()
                         .padding(horizontal = 16.dp, vertical = 18.dp)
+                        .testTag("edit_tx_amount_header")
                 ) {
                     Column {
                         Row(
@@ -2358,7 +2675,10 @@ fun EditTransactionDialog(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
                                 IconButton(
                                     onClick = onDismiss,
                                     modifier = Modifier.size(36.dp)
@@ -2379,20 +2699,61 @@ fun EditTransactionDialog(
                                     },
                                     fontSize = 18.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color.White
+                                    color = Color.White,
+                                    maxLines = 1
                                 )
                             }
 
-                            IconButton(
-                                onClick = { showDeleteConfirmation = true },
-                                modifier = Modifier.size(36.dp)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Delete,
-                                    contentDescription = "Hapus Transaksi",
-                                    tint = Color.White.copy(alpha = 0.9f),
-                                    modifier = Modifier.size(20.dp)
-                                )
+                                IconButton(
+                                    onClick = { showSaveTemplateSheet = true },
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .testTag("btn_edit_save_template")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.BookmarkBorder,
+                                        contentDescription = "Simpan sebagai template",
+                                        tint = Color.White.copy(alpha = 0.95f),
+                                        modifier = Modifier.size(21.dp)
+                                    )
+                                }
+
+                                if (onCopyTransaction != null) {
+                                    IconButton(
+                                        onClick = {
+                                            onCopyTransaction(buildCurrentSnapshot())
+                                            onDismiss()
+                                        },
+                                        modifier = Modifier
+                                            .size(36.dp)
+                                            .testTag("btn_edit_copy_transaction")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.ContentCopy,
+                                            contentDescription = "Salin transaksi",
+                                            tint = Color.White.copy(alpha = 0.95f),
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+
+                                IconButton(
+                                    onClick = { showDeleteConfirmation = true },
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .testTag("btn_edit_delete_transaction")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Hapus Transaksi",
+                                        tint = Color.White.copy(alpha = 0.95f),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                             }
                         }
 
@@ -2492,6 +2853,54 @@ fun EditTransactionDialog(
                                         modifier = Modifier.size(18.dp)
                                     )
                                 }
+                            }
+                        }
+                    }
+                }
+
+                statusBannerMessage?.let { msg ->
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = DarkSurfaceElevated,
+                        border = BorderStroke(1.dp, AccentBlue.copy(alpha = 0.45f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 10.dp)
+                            .testTag("edit_tx_status_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Bookmark,
+                                    contentDescription = null,
+                                    tint = AccentBlue,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = msg,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = TextWhite
+                                )
+                            }
+                            IconButton(
+                                onClick = { statusBannerMessage = null },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Tutup pesan",
+                                    tint = TextMuted,
+                                    modifier = Modifier.size(14.dp)
+                                )
                             }
                         }
                     }
@@ -3349,14 +3758,21 @@ fun EditTransactionDialog(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Icon(
-                                        imageVector = getCategoryIcon(selectedCategory),
+                                        imageVector = CategoryIconHelper.getCategoryIcon(
+                                            selectedSubcategory.ifBlank { selectedCategory },
+                                            matchedCategoryObj?.iconName ?: ""
+                                        ),
                                         contentDescription = null,
-                                        tint = AccentBlue,
+                                        tint = categoryAccentColor,
                                         modifier = Modifier.size(16.dp)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = selectedCategory,
+                                        text = if (selectedSubcategory.isNotBlank()) {
+                                            "$selectedCategory · $selectedSubcategory"
+                                        } else {
+                                            selectedCategory
+                                        },
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Medium,
                                         color = TextWhite
@@ -3792,21 +4208,82 @@ fun EditTransactionDialog(
 
     // Sub-dialogs for Edit
     if (showCategoryPicker) {
-        CategoryPickerSubDialog(
+        TransactionCategoryPickerSheet(
             currentCategory = selectedCategory,
             currentSubcategory = selectedSubcategory,
             categories = allCategories,
-            onCategorySelected = {
-                selectedCategory = it
-                selectedSubcategory = ""
-                showCategoryPicker = false
-            },
+            templates = settings.transactionTemplates,
+            showTemplatesAboveCategories = settings.showTemplatesAboveCategories,
             onCategoryAndSubcategorySelected = { cat, subcat ->
                 selectedCategory = cat
                 selectedSubcategory = subcat
+                preferredTxType = allCategories.firstOrNull {
+                    !it.isDeleted && it.name.equals(cat, ignoreCase = true)
+                }?.type
                 showCategoryPicker = false
             },
+            onSelectTemplate = applyTemplateToEditForm,
+            onOpenTemplatesSheet = { showTemplatePickerSheet = true },
+            onOpenManageCategories = { showManageCategoriesDialog = true },
             onDismiss = { showCategoryPicker = false }
+        )
+    }
+
+    if (showTemplatePickerSheet) {
+        TemplatePickerSheet(
+            templates = settings.transactionTemplates,
+            categories = allCategories,
+            isManageMode = false,
+            onSelectTemplate = applyTemplateToEditForm,
+            onRenameTemplate = { id, newName ->
+                viewModel.renameTransactionTemplate(id, newName)
+                Toast.makeText(context, "Nama template diperbarui", Toast.LENGTH_SHORT).show()
+            },
+            onDeleteTemplate = { id ->
+                viewModel.deleteTransactionTemplate(id)
+                Toast.makeText(context, "Template dihapus", Toast.LENGTH_SHORT).show()
+            },
+            onReorderTemplates = { reordered ->
+                viewModel.reorderTransactionTemplates(reordered)
+            },
+            onDismiss = { showTemplatePickerSheet = false }
+        )
+    }
+
+    if (showSaveTemplateSheet) {
+        val snapshot = buildCurrentSnapshot()
+        SaveTransactionTemplateSheet(
+            initialName = snapshot.note.trim().ifBlank { snapshot.subcategory.ifBlank { snapshot.category } },
+            category = snapshot.category,
+            subcategory = snapshot.subcategory,
+            amount = snapshot.amount,
+            type = snapshot.type,
+            accountName = snapshot.accountName,
+            toAccountName = snapshot.toAccountName,
+            transferFee = snapshot.transferFee,
+            targetAssetId = snapshot.targetAssetId,
+            targetAssetName = snapshot.targetAssetName,
+            targetDebtId = snapshot.targetDebtId,
+            targetDebtName = snapshot.targetDebtName,
+            note = snapshot.note,
+            label = snapshot.label,
+            recurrence = snapshot.recurrence,
+            currency = selectedCurrency,
+            categories = allCategories,
+            onSave = { tpl ->
+                viewModel.saveTransactionTemplate(tpl)
+                showSaveTemplateSheet = false
+                statusBannerMessage = "Disimpan ke template"
+                Toast.makeText(context, "Disimpan ke template", Toast.LENGTH_SHORT).show()
+            },
+            onDismiss = { showSaveTemplateSheet = false }
+        )
+    }
+
+    if (showManageCategoriesDialog) {
+        ManageCategoriesDialog(
+            viewModel = viewModel,
+            onDismiss = { showManageCategoriesDialog = false }
         )
     }
 
@@ -4460,7 +4937,7 @@ fun CategoryPickerSubDialog(
                                         modifier = Modifier.weight(1f),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        val itemCatColor = CategoryIconHelper.getCategoryColor(cat.name, cat.type)
+                                        val itemCatColor = CategoryIconHelper.resolveCategoryColor(cat)
                                         Box(
                                             modifier = Modifier
                                                 .size(34.dp)

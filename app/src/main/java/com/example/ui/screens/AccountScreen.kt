@@ -324,6 +324,8 @@ fun AccountScreen(
                                 subtitle = "Arus kas seluruh dompet aktif",
                                 customPointsMap = accountChartPoints,
                                 transactions = transactions,
+                                wallets = wallets,
+                                allowNegative = true,
                                 externalIsBalanceHidden = isBalanceHidden,
                                 onToggleBalanceVisibility = { viewModel.toggleBalanceVisibility() }
                             )

@@ -54,6 +54,11 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val settings by viewModel.settings.collectAsState()
+            val categories by viewModel.categories.collectAsState()
+
+            LaunchedEffect(categories) {
+                com.example.util.CategoryIconHelper.updateCustomCategoryColors(categories)
+            }
 
             LaunchedEffect(Unit) {
                 viewModel.trySilentSignIn(this@MainActivity)
@@ -130,6 +135,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        viewModel.checkAndExecuteDueRecurringTransactions()
     }
 
     override fun onNewIntent(intent: Intent) {

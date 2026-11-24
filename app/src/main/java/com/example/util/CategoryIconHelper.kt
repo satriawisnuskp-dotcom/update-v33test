@@ -297,7 +297,113 @@ object CategoryIconHelper {
         Color(0xFFEF4444)  // Ruby Red
     )
 
+    const val LEGACY_PLACEHOLDER_CATEGORY_COLOR: Long = 0xFF3B82F6L
+
+    data class CategoryColorSwatch(
+        val label: String,
+        val colorHex: Long
+    )
+
+    // Curated vivid Material/Tailwind swatches (none equals LEGACY_PLACEHOLDER_CATEGORY_COLOR so legacy Room rows remain default)
+    val categoryColorPalette = listOf(
+        CategoryColorSwatch("Merah Coral", 0xFFEF4444L),
+        CategoryColorSwatch("Crimson", 0xFFE11D48L),
+        CategoryColorSwatch("Pink Rose", 0xFFEC4899L),
+        CategoryColorSwatch("Magenta", 0xFFD946EFL),
+        CategoryColorSwatch("Ungu Violet", 0xFF8B5CF6L),
+        CategoryColorSwatch("Indigo", 0xFF6366F1L),
+        CategoryColorSwatch("Biru Royal", 0xFF2563EBL),
+        CategoryColorSwatch("Biru Langit", 0xFF0284C7L),
+        CategoryColorSwatch("Cyan", 0xFF06B6D4L),
+        CategoryColorSwatch("Teal", 0xFF009688L),
+        CategoryColorSwatch("Mint Teal", 0xFF14B8A6L),
+        CategoryColorSwatch("Emerald", 0xFF10B981L),
+        CategoryColorSwatch("Lime", 0xFF84CC16L),
+        CategoryColorSwatch("Amber", 0xFFEAB308L),
+        CategoryColorSwatch("Emas", 0xFFF59E0BL),
+        CategoryColorSwatch("Oranye", 0xFFFF6D00L),
+        CategoryColorSwatch("Oranye Bata", 0xFFFF5722L),
+        CategoryColorSwatch("Karamel", 0xFFD97706L)
+    )
+
+    @Volatile
+    private var customColorOverrides: Map<String, Long> = emptyMap()
+
+    fun isExplicitCustomColor(colorHex: Long): Boolean {
+        return colorHex != 0L && colorHex != LEGACY_PLACEHOLDER_CATEGORY_COLOR
+    }
+
+    fun updateCustomCategoryColors(categories: List<com.example.data.model.MainCategory>) {
+        val nextMap = HashMap<String, Long>(categories.size * 2)
+        categories.forEach { cat ->
+            if (!cat.isDeleted && isExplicitCustomColor(cat.colorHex)) {
+                val cleanName = cat.name.trim().lowercase()
+                if (cleanName.isNotEmpty()) {
+                    nextMap["${cat.type.name}:$cleanName"] = cat.colorHex
+                    nextMap.putIfAbsent(cleanName, cat.colorHex)
+                }
+            }
+        }
+        customColorOverrides = nextMap
+    }
+
+    fun resolveCategoryColor(
+        category: com.example.data.model.MainCategory?,
+        fallbackName: String = category?.name ?: "Other",
+        fallbackType: TransactionType = category?.type ?: TransactionType.EXPENSE
+    ): Color {
+        if (category != null && isExplicitCustomColor(category.colorHex)) {
+            return Color(category.colorHex)
+        }
+        return getDefaultCategoryColor(fallbackName, fallbackType)
+    }
+
+    fun resolveCategoryColor(
+        categories: List<com.example.data.model.MainCategory>,
+        categoryName: String,
+        type: TransactionType = TransactionType.EXPENSE
+    ): Color {
+        val matched = categories.firstOrNull {
+            !it.isDeleted && it.type == type && it.name.equals(categoryName, ignoreCase = true)
+        } ?: categories.firstOrNull {
+            !it.isDeleted && it.name.equals(categoryName, ignoreCase = true)
+        }
+        return if (matched != null && isExplicitCustomColor(matched.colorHex)) {
+            Color(matched.colorHex)
+        } else {
+            getCategoryColor(categoryName, type)
+        }
+    }
+
+    fun headerColorForCategory(categoryColor: Color): Color {
+        // Keep header rich and ensure white text has comfortable contrast even on bright colors (e.g. Lime / Amber)
+        val r = categoryColor.red
+        val g = categoryColor.green
+        val b = categoryColor.blue
+        val luminance = 0.2126f * r + 0.7152f * g + 0.0722f * b
+        return if (luminance > 0.56f) {
+            Color(
+                red = (r * 0.72f).coerceIn(0f, 1f),
+                green = (g * 0.72f).coerceIn(0f, 1f),
+                blue = (b * 0.72f).coerceIn(0f, 1f),
+                alpha = 1f
+            )
+        } else {
+            categoryColor
+        }
+    }
+
     fun getCategoryColor(categoryName: String, type: TransactionType = TransactionType.EXPENSE): Color {
+        val clean = categoryName.trim().lowercase()
+        val overrides = customColorOverrides
+        val overrideHex = overrides["${type.name}:$clean"] ?: overrides[clean]
+        if (overrideHex != null && isExplicitCustomColor(overrideHex)) {
+            return Color(overrideHex)
+        }
+        return getDefaultCategoryColor(categoryName, type)
+    }
+
+    fun getDefaultCategoryColor(categoryName: String, type: TransactionType = TransactionType.EXPENSE): Color {
         val name = categoryName.lowercase()
 
         if (type == TransactionType.INCOME) {

@@ -163,6 +163,7 @@ fun SettingsScreen(
     var showManageLabelsDialog by remember { mutableStateOf(false) }
     var showManageCategoriesDialog by remember { mutableStateOf(false) }
     var showRecurringDialog by remember { mutableStateOf(false) }
+    var showManageTemplatesSheet by remember { mutableStateOf(false) }
     var showNavigationOrderDialog by remember { mutableStateOf(false) }
     var showPasscodeDialog by remember { mutableStateOf(false) }
     var showFeedbackDialog by remember { mutableStateOf(false) }
@@ -176,6 +177,7 @@ fun SettingsScreen(
     var showBudgetWarningDialog by remember { mutableStateOf(false) }
     var showSavingsTargetDialog by remember { mutableStateOf(false) }
 
+    val categories by viewModel.categories.collectAsState()
     val allTransactions by viewModel.allTransactions.collectAsState()
     val (computedIncomeTotal, incomeBreakdown) = remember(allTransactions) {
         TransactionMathHelper.buildCategoryBreakdown(allTransactions, TransactionType.INCOME)
@@ -645,6 +647,28 @@ fun SettingsScreen(
                         )
 
                         SettingsItemClickable(
+                            iconType = SettingsIconType.TEMPLATE,
+                            title = "Template",
+                            subtitle = "${settings.transactionTemplates.size} tersimpan · ganti nama, urutkan, hapus",
+                            onClick = { showManageTemplatesSheet = true },
+                            modifier = Modifier.testTag("settings_item_templates")
+                        )
+
+                        SettingsItemSwitch(
+                            iconType = SettingsIconType.TEMPLATE_ABOVE_CATEGORY,
+                            title = "Tampilkan template di atas kategori",
+                            subtitle = if (settings.showTemplatesAboveCategories) {
+                                "Aktif: tampil langsung di atas daftar kategori"
+                            } else {
+                                "Mati: buka dari bookmark di daftar kategori"
+                            },
+                            checked = settings.showTemplatesAboveCategories,
+                            onCheckedChange = { enabled ->
+                                viewModel.setShowTemplatesAboveCategories(enabled)
+                            }
+                        )
+
+                        SettingsItemClickable(
                             iconType = SettingsIconType.NAV_ORDER,
                             title = "Urutan Menu Utama",
                             subtitle = "Kustomisasi urutan tab navigasi bawah",
@@ -992,6 +1016,26 @@ fun SettingsScreen(
             )
         }
 
+        if (showManageTemplatesSheet) {
+            com.example.ui.dialogs.TemplatePickerSheet(
+                templates = settings.transactionTemplates,
+                categories = categories,
+                isManageMode = true,
+                onRenameTemplate = { id, newName ->
+                    viewModel.renameTransactionTemplate(id, newName)
+                    Toast.makeText(context, "Nama template diperbarui", Toast.LENGTH_SHORT).show()
+                },
+                onDeleteTemplate = { id ->
+                    viewModel.deleteTransactionTemplate(id)
+                    Toast.makeText(context, "Template dihapus", Toast.LENGTH_SHORT).show()
+                },
+                onReorderTemplates = { reordered ->
+                    viewModel.reorderTransactionTemplates(reordered)
+                },
+                onDismiss = { showManageTemplatesSheet = false }
+            )
+        }
+
         if (showNumberFormatDialog) {
             NumberFormatDialog(
                 currentFormat = settings.numberFormat,
@@ -1130,10 +1174,11 @@ fun SettingsItemClickable(
     badgeValue: String? = null,
     iconTint: Color = AccentBlue,
     titleColor: Color = TextWhite,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 7.dp),

@@ -303,6 +303,66 @@ object RoomEntityMappers {
         return "logo_${sanitizeFirestoreId(fileName)}".take(128)
     }
 
+    fun isDailyOrWeeklyFrequency(frequency: String): Boolean {
+        val f = frequency.trim().lowercase(java.util.Locale.US)
+        return f.contains("hari") || f.contains("minggu")
+    }
+
+    fun buildRecurringCycleKey(month: Int, year: Int): String {
+        val safeMonth = month.coerceIn(1, 12)
+        val safeYear = year.coerceIn(1970, 2100)
+        return "$safeMonth/$safeYear"
+    }
+
+    fun buildRecurringPeriodToken(
+        month: Int,
+        year: Int,
+        day: Int? = null,
+        frequency: String = ""
+    ): String {
+        val safeYear = year.coerceIn(1970, 2100)
+        val safeMonth = month.coerceIn(1, 12)
+        return if (isDailyOrWeeklyFrequency(frequency) && day != null) {
+            val safeDay = day.coerceIn(1, 31)
+            String.format(java.util.Locale.US, "%04d-%02d-%02d", safeYear, safeMonth, safeDay)
+        } else {
+            String.format(java.util.Locale.US, "%04d-%02d", safeYear, safeMonth)
+        }
+    }
+
+    fun buildRecurringOccurrenceTxId(
+        recurringId: String,
+        month: Int,
+        year: Int,
+        day: Int? = null,
+        frequency: String = ""
+    ): String {
+        val period = buildRecurringPeriodToken(month, year, day, frequency)
+        val cleanRule = sanitizeFirestoreId(recurringId)
+        val prefix = "recur_"
+        val suffix = "_$period"
+        val maxRuleLen = (128 - prefix.length - suffix.length).coerceAtLeast(16)
+        val rulePart = if (cleanRule.length <= maxRuleLen) {
+            cleanRule
+        } else {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(cleanRule.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+                .take(12)
+            "${cleanRule.take((maxRuleLen - 13).coerceAtLeast(4))}_$digest"
+        }
+        return "$prefix$rulePart$suffix".take(128)
+    }
+
+    fun parseRecurringDayMonthYear(dateStr: String): Triple<Int, Int, Int>? {
+        val parts = dateStr.trim().split("/")
+        if (parts.size != 3) return null
+        val d = parts[0].toIntOrNull()?.coerceIn(1, 31) ?: return null
+        val m = parts[1].toIntOrNull()?.coerceIn(1, 12) ?: return null
+        val y = parts[2].toIntOrNull()?.coerceIn(1970, 2100) ?: return null
+        return Triple(d, m, y)
+    }
+
     fun computeTransactionEpoch(day: Int, monthIndex: Int, year: Int, timeStr: String): Long {
         val parts = timeStr.replace(".", ":").split(":")
         val hour = parts.getOrNull(0)?.toIntOrNull()?.coerceIn(0, 23) ?: 12
@@ -477,7 +537,7 @@ object RoomEntityMappers {
         name = name,
         type = type.name,
         icon = iconName,
-        color = 0xFF3B82F6L,
+        color = if (com.example.util.CategoryIconHelper.isExplicitCustomColor(colorHex)) colorHex else 0L,
         isVisible = isVisible,
         subcategoriesJson = serializeSubcategories(subcategories),
         sortOrder = sortOrder,
@@ -490,6 +550,7 @@ object RoomEntityMappers {
         name = name,
         type = enumValues<TransactionType>().firstOrNull { it.name == type } ?: TransactionType.EXPENSE,
         iconName = icon,
+        colorHex = if (com.example.util.CategoryIconHelper.isExplicitCustomColor(color)) color else 0L,
         isVisible = isVisible,
         subcategories = parseSubcategories(subcategoriesJson),
         updatedAt = updatedAt,
@@ -1088,7 +1149,73 @@ object RoomEntityMappers {
         }
     }
 
-    // ==================== FULL USER SETTINGS ====================
+    // ==================== TRANSACTION TEMPLATES & FULL USER SETTINGS ====================
+
+    fun serializeTransactionTemplatesArray(list: List<com.example.data.model.TransactionTemplate>): JSONArray {
+        val arr = JSONArray()
+        list.forEachIndexed { idx, t ->
+            arr.put(
+                JSONObject().apply {
+                    put("id", t.id)
+                    put("name", t.name)
+                    put("category", t.category)
+                    put("subcategory", t.subcategory)
+                    put("amount", t.amount)
+                    put("rememberAmount", t.rememberAmount)
+                    put("type", t.type.name)
+                    put("accountName", t.accountName)
+                    put("toAccountName", t.toAccountName)
+                    put("transferFee", t.transferFee)
+                    put("targetAssetId", t.targetAssetId)
+                    put("targetAssetName", t.targetAssetName)
+                    put("targetDebtId", t.targetDebtId)
+                    put("targetDebtName", t.targetDebtName)
+                    put("note", t.note)
+                    put("label", t.label)
+                    put("recurrence", t.recurrence)
+                    put("currency", t.currency)
+                    put("sortOrder", idx)
+                    put("updatedAt", t.updatedAt)
+                }
+            )
+        }
+        return arr
+    }
+
+    fun parseTransactionTemplatesArray(arr: JSONArray?): List<com.example.data.model.TransactionTemplate> {
+        if (arr == null) return emptyList()
+        val out = mutableListOf<com.example.data.model.TransactionTemplate>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val txType = enumValues<TransactionType>().firstOrNull { it.name == o.optString("type", "EXPENSE") }
+                ?: TransactionType.EXPENSE
+            out.add(
+                com.example.data.model.TransactionTemplate(
+                    id = o.optString("id", UUID.randomUUID().toString()),
+                    name = o.optString("name", o.optString("category", "Template")),
+                    category = o.optString("category", "Other"),
+                    subcategory = o.optString("subcategory", ""),
+                    amount = o.optDouble("amount", 0.0),
+                    rememberAmount = o.optBoolean("rememberAmount", true),
+                    type = txType,
+                    accountName = o.optString("accountName", ""),
+                    toAccountName = o.optString("toAccountName", ""),
+                    transferFee = o.optDouble("transferFee", 0.0),
+                    targetAssetId = o.optString("targetAssetId", ""),
+                    targetAssetName = o.optString("targetAssetName", ""),
+                    targetDebtId = o.optString("targetDebtId", ""),
+                    targetDebtName = o.optString("targetDebtName", ""),
+                    note = o.optString("note", ""),
+                    label = o.optString("label", ""),
+                    recurrence = o.optString("recurrence", "Tidak pernah"),
+                    currency = o.optString("currency", "IDR"),
+                    sortOrder = o.optInt("sortOrder", i),
+                    updatedAt = o.optLong("updatedAt", 1L)
+                )
+            )
+        }
+        return out.sortedBy { it.sortOrder }
+    }
 
     fun serializeUserSettings(s: UserSettings): String {
         return JSONObject().apply {
@@ -1127,6 +1254,8 @@ object RoomEntityMappers {
             put("dashboardWidgetsOrder", JSONArray(s.dashboardWidgetsOrder))
             put("hiddenDashboardWidgets", JSONArray(s.hiddenDashboardWidgets))
             put("hasCompletedOnboarding", s.hasCompletedOnboarding)
+            put("transactionTemplates", serializeTransactionTemplatesArray(s.transactionTemplates))
+            put("showTemplatesAboveCategories", s.showTemplatesAboveCategories)
         }.toString()
     }
 
@@ -1175,7 +1304,9 @@ object RoomEntityMappers {
                 trenBerdampinganEnabled = sObj.optBoolean("trenBerdampinganEnabled", def.trenBerdampinganEnabled),
                 dashboardWidgetsOrder = optStringList("dashboardWidgetsOrder", def.dashboardWidgetsOrder, nonEmptyOnly = true),
                 hiddenDashboardWidgets = optStringList("hiddenDashboardWidgets", def.hiddenDashboardWidgets),
-                hasCompletedOnboarding = sObj.optBoolean("hasCompletedOnboarding", true)
+                hasCompletedOnboarding = sObj.optBoolean("hasCompletedOnboarding", true),
+                transactionTemplates = parseTransactionTemplatesArray(sObj.optJSONArray("transactionTemplates")),
+                showTemplatesAboveCategories = sObj.optBoolean("showTemplatesAboveCategories", def.showTemplatesAboveCategories)
             )
         } catch (_: Exception) {
             def

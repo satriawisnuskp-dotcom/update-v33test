@@ -28,15 +28,21 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.EventRepeat
 import androidx.compose.material.icons.filled.Subscriptions
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.HelpOutline
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -227,6 +233,7 @@ fun RecurringTransactionDialog(
     val recurringList by viewModel.recurringTransactions.collectAsState()
     val allTransactions by viewModel.allTransactions.collectAsState()
     val wallets by viewModel.wallets.collectAsState()
+    val duplicateEntries by viewModel.duplicateRecurringEntries.collectAsState()
 
     var selectedTab by remember { mutableIntStateOf(1) } // 0 = Mendatang, 1 = Semua (matches video entry)
     var sortOption by remember { mutableStateOf(RecurringSortOption.NEXT_DUE_DATE) }
@@ -241,6 +248,7 @@ fun RecurringTransactionDialog(
     var showLanggananDialog by remember { mutableStateOf(false) }
     var showTemplatesSheet by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
+    var showDuplicateCleanupDialog by remember { mutableStateOf(false) }
 
     val todayCal = remember { Calendar.getInstance() }
     val todayDay = todayCal.get(Calendar.DAY_OF_MONTH)
@@ -426,6 +434,56 @@ fun RecurringTransactionDialog(
                     }
                 }
 
+                if (duplicateEntries.isNotEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xFFF59E0B).copy(alpha = 0.14f),
+                        border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.45f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                            .testTag("banner_recurring_duplicates")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Warning,
+                                    contentDescription = "Peringatan duplikat transaksi berulang",
+                                    tint = Color(0xFFF59E0B),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Terdeteksi ${duplicateEntries.size} duplikat transaksi berulang.",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = TextWhite
+                                )
+                            }
+                            TextButton(
+                                onClick = { showDuplicateCleanupDialog = true },
+                                modifier = Modifier.testTag("btn_open_duplicate_cleanup")
+                            ) {
+                                Text(
+                                    text = "Bersihkan",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFFBBF24)
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // Main Scrollable Content
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -596,6 +654,66 @@ fun RecurringTransactionDialog(
 
     if (showHelpDialog) {
         RecurringHelpDialog(onDismiss = { showHelpDialog = false })
+    }
+
+    if (showDuplicateCleanupDialog) {
+        AlertDialog(
+            onDismissRequest = { showDuplicateCleanupDialog = false },
+            containerColor = DarkSurfaceElevated,
+            titleContentColor = TextWhite,
+            textContentColor = TextMuted,
+            title = {
+                Text(
+                    text = "Bersihkan Duplikat Berulang",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 17.sp
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Ditemukan ${duplicateEntries.size} catatan otomatis transaksi berulang yang tercatat ganda untuk periode yang sama. Transaksi manual Anda tidak akan disentuh.",
+                        fontSize = 13.5.sp,
+                        color = TextMuted
+                    )
+                    Text(
+                        text = "Pilih \"Hapus Duplikat Saja\" jika saldo dompet saat ini sudah benar (kasus sinkronisasi 2 perangkat), atau \"Hapus & Koreksi Saldo\" jika dompet sempat terpotong 2 kali.",
+                        fontSize = 12.5.sp,
+                        color = TextSubtle
+                    )
+                }
+            },
+            confirmButton = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalAlignment = Alignment.End
+                ) {
+                    Button(
+                        onClick = {
+                            viewModel.cleanupDuplicateRecurringTransactions(adjustWalletBalance = false)
+                            showDuplicateCleanupDialog = false
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = AccentBlue),
+                        modifier = Modifier.testTag("btn_cleanup_duplicates_only")
+                    ) {
+                        Text("Hapus Duplikat Saja", color = Color.White, fontWeight = FontWeight.SemiBold)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.cleanupDuplicateRecurringTransactions(adjustWalletBalance = true)
+                            showDuplicateCleanupDialog = false
+                        },
+                        border = BorderStroke(1.dp, DarkCardBorder),
+                        modifier = Modifier.testTag("btn_cleanup_duplicates_and_balance")
+                    ) {
+                        Text("Hapus & Koreksi Saldo", color = TextWhite, fontWeight = FontWeight.Medium)
+                    }
+                    TextButton(onClick = { showDuplicateCleanupDialog = false }) {
+                        Text("Batal", color = TextMuted)
+                    }
+                }
+            }
+        )
     }
 
     if (showAddDialog) {

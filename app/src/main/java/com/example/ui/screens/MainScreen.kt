@@ -120,6 +120,7 @@ fun MainScreen(
     var showProfileSyncScreen by remember { mutableStateOf(false) }
     var activeDebtToPay by remember { mutableStateOf<DebtItem?>(null) }
     var activeTransactionToEdit by remember { mutableStateOf<Transaction?>(null) }
+    var copiedTransactionDraft by remember { mutableStateOf<Transaction?>(null) }
     var prefillEventLabel by remember { mutableStateOf("") }
     var prefillTxCategory by remember { mutableStateOf("Other") }
     var showCalculatorsDialog by remember { mutableStateOf(false) }
@@ -484,12 +485,27 @@ fun MainScreen(
     }
 
     if (showAddTxDialog) {
+        val draft = copiedTransactionDraft
         AddTransactionDialog(
             viewModel = viewModel,
-            initialCategory = prefillTxCategory,
-            initialLabel = prefillEventLabel,
+            initialCategory = draft?.category ?: prefillTxCategory,
+            initialWallet = draft?.accountName,
+            initialToWallet = draft?.toAccountName?.takeIf { it.isNotBlank() },
+            initialLabel = draft?.label ?: prefillEventLabel,
+            initialAmount = draft?.amount ?: 0.0,
+            initialNote = draft?.note ?: "",
+            initialSubcategory = draft?.subcategory ?: "",
+            initialRecurrence = draft?.recurrence?.ifBlank { "Tidak pernah" } ?: "Tidak pernah",
+            initialTransferFee = draft?.transferFee ?: 0.0,
+            initialTargetAssetId = draft?.targetAssetId ?: "",
+            initialTargetAssetName = draft?.targetAssetName ?: "",
+            initialTargetDebtId = draft?.targetDebtId ?: "",
+            initialTargetDebtName = draft?.targetDebtName ?: "",
+            initialType = draft?.type,
+            isCopyMode = draft != null,
             onDismiss = {
                 showAddTxDialog = false
+                copiedTransactionDraft = null
                 prefillEventLabel = ""
                 prefillTxCategory = "Other"
             }
@@ -539,6 +555,11 @@ fun MainScreen(
         EditTransactionDialog(
             transaction = tx,
             viewModel = viewModel,
+            onCopyTransaction = { draft ->
+                activeTransactionToEdit = null
+                copiedTransactionDraft = draft
+                showAddTxDialog = true
+            },
             onDismiss = { activeTransactionToEdit = null }
         )
     }

@@ -430,14 +430,21 @@ fun RecurringDetailScreen(
                                 Spacer(modifier = Modifier.height(14.dp))
 
                                 // Action Buttons Row: Catat pembayaran | Edit & catat
+                                val isSingleMonthlyOrYearly = !item.frequency.contains("hari", ignoreCase = true) &&
+                                    !item.frequency.contains("minggu", ignoreCase = true)
+                                val recordDisabled = isProcessedThisCycle && isSingleMonthlyOrYearly
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
                                     Button(
                                         onClick = { viewModel.processRecurringTransaction(item.id) },
+                                        enabled = !recordDisabled,
                                         shape = RoundedCornerShape(12.dp),
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F9D79)),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = Color(0xFF4F9D79),
+                                            disabledContainerColor = Color(0xFF4F9D79).copy(alpha = 0.35f)
+                                        ),
                                         contentPadding = PaddingValues(vertical = 12.dp),
                                         modifier = Modifier
                                             .weight(1.1f)
@@ -446,7 +453,13 @@ fun RecurringDetailScreen(
                                     ) {
                                         Icon(Icons.Default.Check, null, tint = Color.White, modifier = Modifier.size(16.dp))
                                         Spacer(modifier = Modifier.width(6.dp))
-                                        Text("Catat pembayaran", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1)
+                                        Text(
+                                            text = if (recordDisabled) "Sudah dicatat" else "Catat pembayaran",
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White,
+                                            maxLines = 1
+                                        )
                                     }
 
                                     OutlinedButton(

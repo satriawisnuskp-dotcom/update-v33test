@@ -117,6 +117,7 @@ class FinanceViewModel(
     fun initStorage(context: android.content.Context) {
         repository.initContext(context)
         _isBalanceHidden.value = repository.settings.value.defaultHideBalance
+        checkAndExecuteDueRecurringTransactions()
     }
 
     // Filter states dynamically ending at current month and year
@@ -175,6 +176,12 @@ class FinanceViewModel(
     val labels: StateFlow<List<String>> = repository.labels
     val categories: StateFlow<List<MainCategory>> = repository.categories
     val recurringTransactions: StateFlow<List<RecurringTransaction>> = repository.recurringTransactions
+    val duplicateRecurringEntries: StateFlow<List<FinanceRepository.DuplicateRecurringEntry>> = combine(
+        repository.recurringTransactions,
+        repository.transactions
+    ) { _, _ ->
+        repository.findDuplicateRecurringTransactions()
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val planTitle: StateFlow<String> = repository.planTitle
     val plannedItems: StateFlow<List<PlannedItem>> = repository.plannedItems
     val financialPlans: StateFlow<List<FinancialPlan>> = repository.financialPlans
@@ -331,12 +338,14 @@ class FinanceViewModel(
     // Reactive line chart datasets generated from real-time transaction history & balances
     val dashboardChartPoints: StateFlow<Map<String, List<FinancialDataPoint>>> = combine(
         repository.transactions,
-        totalAllWalletsBalance
-    ) { txs, balance ->
+        repository.wallets
+    ) { txs, walletList ->
         ChartDataHelper.generateAllTimeframePoints(
             transactions = txs,
-            currentBalance = balance,
-            walletFilter = "Semua"
+            currentBalance = walletList.sumOf { it.balance },
+            walletFilter = "Semua",
+            allowNegative = true,
+            wallets = walletList
         )
     }.flowOn(Dispatchers.Default).stateIn(
         viewModelScope,
@@ -360,15 +369,16 @@ class FinanceViewModel(
 
     val accountChartPoints: StateFlow<Map<String, List<FinancialDataPoint>>> = combine(
         repository.transactions,
-        totalAllWalletsBalance,
-        repository.selectedWalletFilter
-    ) { txs, balance, walletFilter ->
+        repository.wallets
+    ) { txs, walletList ->
         ChartDataHelper.generateAllTimeframePoints(
             transactions = txs,
-            currentBalance = balance,
-            walletFilter = walletFilter
+            currentBalance = walletList.sumOf { it.balance },
+            walletFilter = "Semua",
+            allowNegative = true,
+            wallets = walletList
         )
-    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     val assetsChartPoints: StateFlow<Map<String, List<FinancialDataPoint>>> = repository.assets.map { assetList ->
         ChartDataHelper.generateAssetsTimeframePoints(assetList, assetList.sumOf { it.realValue })
@@ -775,6 +785,10 @@ class FinanceViewModel(
         return repository.checkAndExecuteDueRecurringTransactions(currentDay, currentMonth, currentYear)
     }
 
+    fun cleanupDuplicateRecurringTransactions(adjustWalletBalance: Boolean = false): Int {
+        return repository.cleanupDuplicateRecurringTransactions(adjustWalletBalance = adjustWalletBalance)
+    }
+
     fun updatePlanTitle(newTitle: String) {
         repository.updatePlanTitle(newTitle)
     }
@@ -858,6 +872,26 @@ class FinanceViewModel(
 
     fun toggleSubcategoryVisibility(categoryId: String, subcategoryId: String) {
         repository.toggleSubcategoryVisibility(categoryId, subcategoryId)
+    }
+
+    fun saveTransactionTemplate(template: com.example.data.model.TransactionTemplate) {
+        repository.saveTransactionTemplate(template)
+    }
+
+    fun renameTransactionTemplate(templateId: String, newName: String) {
+        repository.renameTransactionTemplate(templateId, newName)
+    }
+
+    fun deleteTransactionTemplate(templateId: String) {
+        repository.deleteTransactionTemplate(templateId)
+    }
+
+    fun reorderTransactionTemplates(reordered: List<com.example.data.model.TransactionTemplate>) {
+        repository.reorderTransactionTemplates(reordered)
+    }
+
+    fun setShowTemplatesAboveCategories(show: Boolean) {
+        repository.setShowTemplatesAboveCategories(show)
     }
 
     fun resetAllData(createDefaultWallet: Boolean = false) {

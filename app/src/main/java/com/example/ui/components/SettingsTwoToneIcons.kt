@@ -47,6 +47,8 @@ enum class SettingsIconType {
     CATEGORIES,             // Kategori Transaksi
     LABELS,                 // Label Transaksi
     RECURRING,              // Transaksi Berulang
+    TEMPLATE,               // Template Transaksi
+    TEMPLATE_ABOVE_CATEGORY,// Tampilkan template di atas kategori
     NAV_ORDER,              // Urutan Menu Utama
     EXPORT_PDF,             // Ekspor Laporan PDF
     EXPORT_CSV,             // Ekspor Data Excel / CSV
@@ -945,6 +947,43 @@ fun SettingsTwoToneIcon(
                 }
                 drawPath(path = tri, color = FixedYellow)
                 drawCircle(color = Color(0xFF131822), radius = 1.2.dp.toPx(), center = Offset(center.x, center.y + r * 0.3f))
+            }
+
+            SettingsIconType.TEMPLATE -> {
+                // Bookmark ribbon with accent corner star/notch
+                val bmPath = Path().apply {
+                    moveTo(w * 0.24f, h * 0.14f)
+                    lineTo(w * 0.76f, h * 0.14f)
+                    lineTo(w * 0.76f, h * 0.88f)
+                    lineTo(w * 0.50f, h * 0.68f)
+                    lineTo(w * 0.24f, h * 0.88f)
+                    close()
+                }
+                drawPath(path = bmPath, color = themeColor.copy(alpha = 0.24f))
+                drawPath(path = bmPath, color = themeColor, style = Stroke(1.9.dp.toPx(), join = StrokeJoin.Round))
+                drawCircle(color = FixedYellow, radius = 3.2.dp.toPx(), center = Offset(w * 0.50f, h * 0.40f))
+            }
+
+            SettingsIconType.TEMPLATE_ABOVE_CATEGORY -> {
+                // Template chip bar stacked above category rows
+                drawRoundRect(
+                    color = FixedYellow,
+                    topLeft = Offset(w * 0.14f, h * 0.16f),
+                    size = Size(w * 0.72f, h * 0.22f),
+                    cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx())
+                )
+                drawRoundRect(
+                    color = themeColor.copy(alpha = 0.28f),
+                    topLeft = Offset(w * 0.14f, h * 0.48f),
+                    size = Size(w * 0.72f, h * 0.14f),
+                    cornerRadius = CornerRadius(2.5.dp.toPx(), 2.5.dp.toPx())
+                )
+                drawRoundRect(
+                    color = themeColor,
+                    topLeft = Offset(w * 0.14f, h * 0.70f),
+                    size = Size(w * 0.72f, h * 0.14f),
+                    cornerRadius = CornerRadius(2.5.dp.toPx(), 2.5.dp.toPx())
+                )
             }
         }
     }

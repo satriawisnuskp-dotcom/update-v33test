@@ -25,10 +25,34 @@ data class MainCategory(
     val name: String,
     val type: TransactionType = TransactionType.EXPENSE,
     val iconName: String = "",
+    val colorHex: Long = 0L,
     val isVisible: Boolean = true,
     val subcategories: List<SubcategoryItem> = emptyList(),
     val updatedAt: Long = System.currentTimeMillis(),
     val isDeleted: Boolean = false
+)
+
+data class TransactionTemplate(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String,
+    val category: String,
+    val subcategory: String = "",
+    val amount: Double = 0.0,
+    val rememberAmount: Boolean = true,
+    val type: TransactionType = TransactionType.EXPENSE,
+    val accountName: String = "",
+    val toAccountName: String = "",
+    val transferFee: Double = 0.0,
+    val targetAssetId: String = "",
+    val targetAssetName: String = "",
+    val targetDebtId: String = "",
+    val targetDebtName: String = "",
+    val note: String = "",
+    val label: String = "",
+    val recurrence: String = "Tidak pernah",
+    val currency: String = "IDR",
+    val sortOrder: Int = 0,
+    val updatedAt: Long = System.currentTimeMillis()
 )
 
 data class Transaction(
@@ -333,7 +357,9 @@ data class UserSettings(
     val trenBerdampinganEnabled: Boolean = true,
     val dashboardWidgetsOrder: List<String> = defaultDashboardWidgetOrder,
     val hiddenDashboardWidgets: List<String> = emptyList(),
-    val hasCompletedOnboarding: Boolean = false
+    val hasCompletedOnboarding: Boolean = false,
+    val transactionTemplates: List<TransactionTemplate> = emptyList(),
+    val showTemplatesAboveCategories: Boolean = false
 )
 
 data class OnboardingBillInput(
@@ -495,8 +521,10 @@ data class BackupRestoreResult(
     val savingsGoalCount: Int = 0,
     val eventCount: Int = 0,
     val settingsRestored: Boolean = false,
-    val logoCount: Int = 0
+    val logoCount: Int = 0,
+    val customCategoryColorCount: Int = 0,
+    val templateCount: Int = 0
 ) {
-    val totalItems: Int get() = transactionCount + walletCount + assetCount + debtCount + categoryCount + planCount + budgetCount + recurringCount + savingsGoalCount + eventCount + logoCount
+    val totalItems: Int get() = transactionCount + walletCount + assetCount + debtCount + categoryCount + planCount + budgetCount + recurringCount + savingsGoalCount + eventCount + logoCount + templateCount
 }
 

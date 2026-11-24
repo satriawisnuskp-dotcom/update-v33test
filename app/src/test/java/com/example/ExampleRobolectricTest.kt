@@ -2,6 +2,7 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.async
 import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
@@ -935,5 +936,768 @@ class ExampleRobolectricTest {
     assertEquals("cat_custom_hobby", replacedCats.first().id)
     assertEquals("Kuliner Harian", replacedCats.first { it.id == "cat_food" }.name)
     assertEquals(listOf("Komik", "Gunpla"), replacedCats.first().subcategories.map { it.name })
+  }
+
+  @Test
+  fun `account chart calculates exact wallet balance progression across transfers assets debts and deleted wallets`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repository = com.example.data.repository.FinanceRepository()
+    repository.initContext(context)
+    repository.resetAllData(createDefaultWallet = false)
+
+    // Setup initial wallets: BCA (5_000_000), BRI (2_000_000) -> total initial = 7_000_000
+    repository.addWallet(com.example.data.model.AccountWallet(id = "w_bca", name = "BCA", balance = 5_000_000.0))
+    repository.addWallet(com.example.data.model.AccountWallet(id = "w_bri", name = "BRI", balance = 2_000_000.0))
+    repository.addAsset(com.example.data.model.AssetItem(id = "a_gold", name = "Emas Antam", value = 1_000_000.0))
+    repository.addDebt(
+      com.example.data.model.DebtItem(
+        id = "d_loan",
+        name = "Pinjaman Bank",
+        totalAmount = 3_000_000.0,
+        paidAmount = 0.0,
+        dueDate = "31 Des 2026",
+        type = com.example.data.model.DebtType.BORROWED
+      )
+    )
+
+    fun daysAgoCal(daysAgo: Int): Triple<Int, Int, Int> {
+      val c = java.util.Calendar.getInstance()
+      c.add(java.util.Calendar.DAY_OF_MONTH, -daysAgo)
+      return Triple(
+        c.get(java.util.Calendar.DAY_OF_MONTH),
+        c.get(java.util.Calendar.MONTH) + 1,
+        c.get(java.util.Calendar.YEAR)
+      )
+    }
+
+    val (d5, m5, y5) = daysAgoCal(5)
+    val (d4, m4, y4) = daysAgoCal(4)
+    val (d3, m3, y3) = daysAgoCal(3)
+    val (d2, m2, y2) = daysAgoCal(2)
+    val (d1, m1, y1) = daysAgoCal(1)
+
+    // 5 days ago: Income +3_000_000 into BCA -> total wallets = 10_000_000
+    repository.addTransaction(
+      com.example.data.model.Transaction(
+        id = "t_inc",
+        title = "Gaji",
+        category = "Salary",
+        amount = 3_000_000.0,
+        type = com.example.data.model.TransactionType.INCOME,
+        accountName = "BCA",
+        dayOfMonth = d5,
+        monthIndex = m5,
+        year = y5,
+        time = "09:00"
+      )
+    )
+
+    // 4 days ago: Internal transfer BCA -> BRI 1_500_000 with fee 6_500 -> total wallets = 9_993_500
+    repository.addTransaction(
+      com.example.data.model.Transaction(
+        id = "t_internal",
+        title = "Transfer ke BRI",
+        category = "Transfer",
+        amount = 1_500_000.0,
+        type = com.example.data.model.TransactionType.TRANSFER,
+        accountName = "BCA",
+        toAccountName = "BRI",
+        transferFee = 6_500.0,
+        dayOfMonth = d4,
+        monthIndex = m4,
+        year = y4,
+        time = "10:00"
+      )
+    )
+
+    // 3 days ago: Transfer to Asset 1_000_000 from BRI -> total wallets = 8_993_500
+    repository.addTransaction(
+      com.example.data.model.Transaction(
+        id = "t_asset",
+        title = "Transfer ke Emas Antam",
+        category = "Asset",
+        amount = 1_000_000.0,
+        type = com.example.data.model.TransactionType.TRANSFER,
+        accountName = "BRI",
+        toAccountName = "",
+        targetAssetId = "a_gold",
+        targetAssetName = "Emas Antam",
+        dayOfMonth = d3,
+        monthIndex = m3,
+        year = y3,
+        time = "11:00"
+      )
+    )
+
+    // 2 days ago: Bayar Utang (recorded as TRANSFER with targetDebtId) 500_000 from BCA -> total wallets = 8_493_500
+    repository.addTransaction(
+      com.example.data.model.Transaction(
+        id = "t_debt",
+        title = "Bayar Utang Pinjaman Bank",
+        category = "Pembayaran Utang",
+        amount = 500_000.0,
+        type = com.example.data.model.TransactionType.TRANSFER,
+        accountName = "BCA",
+        toAccountName = "Pinjaman Bank",
+        targetDebtId = "d_loan",
+        targetDebtName = "Pinjaman Bank",
+        dayOfMonth = d2,
+        monthIndex = m2,
+        year = y2,
+        time = "12:00"
+      )
+    )
+
+    // 1 day ago: Sell part of Asset (+400_000 back into BRI) via addAssetRecord -> total wallets = 8_893_500
+    val monthNames = listOf("", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des")
+    repository.addAssetRecord(
+      assetId = "a_gold",
+      record = com.example.data.model.AssetRecord(
+        id = "rec_sell_1",
+        assetId = "a_gold",
+        tag = "Sold",
+        isIncrease = false,
+        amount = 400_000.0,
+        sourceWalletName = "BRI",
+        date = "$d1 ${monthNames[m1]} $y1",
+        time = "14:00",
+        note = "Jual sebagian emas"
+      ),
+      updateWalletBalance = true
+    )
+
+    // Also add a deleted wallet's old transaction that should NOT affect active wallets
+    repository.addTransaction(
+      com.example.data.model.Transaction(
+        id = "t_deleted_wallet",
+        title = "Saldo dompet lama",
+        category = "Salary",
+        amount = 4_000_000.0,
+        type = com.example.data.model.TransactionType.INCOME,
+        accountName = "Dompet Dihapus",
+        dayOfMonth = d3,
+        monthIndex = m3,
+        year = y3,
+        time = "08:00"
+      )
+    )
+
+    val viewModel = com.example.ui.viewmodel.FinanceViewModel(repository)
+    // Filter Transactions tab by a single wallet; accountChartPoints MUST still show all wallets combined
+    viewModel.selectWalletFilter("BCA")
+
+    val wallets = repository.wallets.value
+    val txs = repository.transactions.value
+    val expectedTotalBalance = wallets.sumOf { it.balance }
+    assertEquals(8_893_500.0, expectedTotalBalance, 0.01)
+
+    val points7D = com.example.util.ChartDataHelper.generateAllTimeframePoints(
+      transactions = txs,
+      currentBalance = expectedTotalBalance,
+      walletFilter = "Semua",
+      allowNegative = true,
+      wallets = wallets
+    )["7D"]!!
+
+    // 7D indices: 0=6d ago, 1=5d ago, 2=4d ago, 3=3d ago, 4=2d ago, 5=1d ago, 6=today
+    assertEquals(7, points7D.size)
+    assertEquals(7_000_000.0, points7D[0].value, 0.01)  // initial balance before d5 income
+    assertEquals(10_000_000.0, points7D[1].value, 0.01) // after +3_000_000 income
+    assertEquals(9_993_500.0, points7D[2].value, 0.01)  // after internal transfer fee -6_500
+    assertEquals(8_993_500.0, points7D[3].value, 0.01)  // after asset transfer -1_000_000 (deleted wallet ignored)
+    assertEquals(8_493_500.0, points7D[4].value, 0.01)  // after debt payment -500_000
+    assertEquals(8_893_500.0, points7D[5].value, 0.01)  // after asset sale +400_000
+    assertEquals(8_893_500.0, points7D[6].value, 0.01)  // today == current total wallet balance
+    assertEquals(1_893_500.0, points7D[6].deltaAmount, 0.01)
+    assertEquals((1_893_500.0 / 7_000_000.0) * 100.0, points7D[6].percentChange, 0.001)
+
+    // Verify ALL timeframes end at the exact current wallet balance
+    val allPointsMap = com.example.util.ChartDataHelper.generateAllTimeframePoints(
+      transactions = txs,
+      currentBalance = expectedTotalBalance,
+      walletFilter = "Semua",
+      allowNegative = true,
+      wallets = wallets
+    )
+    listOf("7D", "1M", "3M", "YTD", "ALL").forEach { tf ->
+      val pts = allPointsMap[tf]!!
+      assertEquals(expectedTotalBalance, pts.last().value, 0.01)
+    }
+
+    // Verify net worth chart cancels out wallet <-> asset transfers cleanly
+    val netWorth7D = com.example.util.ChartDataHelper.generateNetWorthTimeframePoints(
+      wallets = wallets,
+      assets = repository.assets.value,
+      debts = repository.debts.value,
+      transactions = txs
+    )["7D"]!!
+    // Initial Net Worth: 7_000_000 (wallets) + 1_000_000 (asset) - 3_000_000 (debt) = 5_000_000
+    assertEquals(5_000_000.0, netWorth7D[0].value, 0.01)
+    // After +3M salary: 8_000_000
+    assertEquals(8_000_000.0, netWorth7D[1].value, 0.01)
+    // After transfer fee 6.5k: 7_993_500
+    assertEquals(7_993_500.0, netWorth7D[2].value, 0.01)
+    // After wallet -> asset transfer: stays flat at 7_993_500
+    assertEquals(7_993_500.0, netWorth7D[3].value, 0.01)
+    // After wallet -> debt payment: stays flat at 7_993_500
+    assertEquals(7_993_500.0, netWorth7D[4].value, 0.01)
+  }
+
+  @Test
+  fun `account chart supports negative wallet balances and viewModel ignores transaction wallet filter`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repository = com.example.data.repository.FinanceRepository()
+    repository.initContext(context)
+    repository.resetAllData(createDefaultWallet = false)
+
+    repository.addWallet(com.example.data.model.AccountWallet(id = "w1", name = "BCA", balance = 1_000_000.0))
+    repository.addWallet(com.example.data.model.AccountWallet(id = "w2", name = "BRI", balance = 500_000.0))
+
+    val cal = java.util.Calendar.getInstance()
+    val day = cal.get(java.util.Calendar.DAY_OF_MONTH)
+    val month = cal.get(java.util.Calendar.MONTH) + 1
+    val year = cal.get(java.util.Calendar.YEAR)
+
+    repository.addTransaction(
+      com.example.data.model.Transaction(
+        id = "t_neg_1",
+        title = "Tagihan Besar",
+        category = "Bills & Fees",
+        amount = 2_000_000.0,
+        type = com.example.data.model.TransactionType.EXPENSE,
+        accountName = "BCA",
+        dayOfMonth = day,
+        monthIndex = month,
+        year = year
+      )
+    )
+    // Total balance is now -500_000 (initial 1_500_000 - 2_000_000)
+    assertEquals(-500_000.0, repository.wallets.value.sumOf { it.balance }, 0.01)
+
+    val viewModel = com.example.ui.viewmodel.FinanceViewModel(repository)
+    viewModel.selectWalletFilter("BRI") // Only BRI selected in Transactions tab
+
+    // Wait briefly for Dispatchers.Default emission in accountChartPoints
+    var points7D: List<com.example.ui.components.FinancialDataPoint>? = null
+    for (attempt in 0 until 40) {
+      val map = viewModel.accountChartPoints.value
+      if (map["7D"]?.isNotEmpty() == true) {
+        points7D = map["7D"]
+        break
+      }
+      Thread.sleep(25)
+    }
+    org.junit.Assert.assertNotNull(points7D)
+    val pts = points7D!!
+    assertEquals(1_500_000.0, pts.first().value, 0.01)
+    assertEquals(-500_000.0, pts.last().value, 0.01)
+    assertEquals(-2_000_000.0, pts.last().deltaAmount, 0.01)
+  }
+
+  @Test
+  fun `recurring deterministic occurrence id obeys firestore constraints and blocks same-device double processing`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repository = com.example.data.repository.FinanceRepository()
+    repository.initContext(context)
+    repository.resetAllData(createDefaultWallet = false)
+
+    repository.addWallet(com.example.data.model.AccountWallet(id = "w-bca", name = "BCA", balance = 2_000_000.0))
+
+    val longId = "rec_" + "x".repeat(140)
+    val txId1 = com.example.data.local.RoomEntityMappers.buildRecurringOccurrenceTxId(
+      recurringId = longId,
+      month = 11,
+      year = 2026,
+      day = 15,
+      frequency = "Setiap bulan"
+    )
+    val txId2 = com.example.data.local.RoomEntityMappers.buildRecurringOccurrenceTxId(
+      recurringId = longId,
+      month = 11,
+      year = 2026,
+      day = 15,
+      frequency = "Setiap bulan"
+    )
+    assertEquals(txId1, txId2)
+    org.junit.Assert.assertTrue(txId1.length in 1..128)
+    org.junit.Assert.assertTrue(txId1.matches(Regex("^[a-zA-Z0-9_\\-]+$")))
+
+    val rule = com.example.data.model.RecurringTransaction(
+      id = "rec-netflix",
+      title = "Netflix",
+      amount = 186_000.0,
+      type = com.example.data.model.TransactionType.EXPENSE,
+      category = "Entertainment",
+      accountName = "BCA",
+      dayOfMonth = 10,
+      frequency = "Setiap bulan",
+      isActive = true,
+      autoDeduct = true
+    )
+    repository.addRecurringTransaction(rule, checkImmediateProcess = false)
+
+    val firstRun = repository.checkAndExecuteDueRecurringTransactions(15, 11, 2026)
+    val secondRun = repository.checkAndExecuteDueRecurringTransactions(15, 11, 2026)
+    val manualTapAfterProcessed = repository.processRecurringTransaction("rec-netflix", month = 11, year = 2026)
+
+    assertEquals(1, firstRun)
+    assertEquals(0, secondRun)
+    org.junit.Assert.assertFalse(manualTapAfterProcessed)
+    assertEquals(1, repository.transactions.value.size)
+    assertEquals(
+      "recur_rec-netflix_2026-11",
+      repository.transactions.value.first().id
+    )
+    assertEquals("11/2026", repository.recurringTransactions.value.first().lastProcessedMonthYear)
+    assertEquals(1_814_000.0, repository.wallets.value.first { it.name == "BCA" }.balance, 0.01)
+  }
+
+  @Test
+  fun `two devices running concurrently against shared cloud claim only create one recurring transaction`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+
+    // Simulated shared Firestore server state enforcing atomic optimistic transaction claim
+    val cloudLock = Any()
+    val cloudTransactions = mutableMapOf<String, com.example.data.local.TransactionEntity>()
+    val cloudRecurring = mutableMapOf<String, com.example.data.local.RecurringEntity>()
+    val claimAttemptCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+    val sharedGateway = object : com.example.data.sync.RecurringCloudGateway {
+      override fun isSignedInAndOnline(): Boolean = true
+      override fun hasCompletedInitialCloudSync(): Boolean = true
+      override suspend fun tryClaimRecurringOccurrence(
+        txEntity: com.example.data.local.TransactionEntity,
+        updatedRecurringEntity: com.example.data.local.RecurringEntity,
+        expectedCycleKey: String
+      ): com.example.data.sync.RecurringCloudClaimResult {
+        // Introduce slight scheduling jitter to force genuine interleaving between Device A and Device B
+        Thread.sleep(15)
+        claimAttemptCount.incrementAndGet()
+        synchronized(cloudLock) {
+          val existingTx = cloudTransactions[txEntity.id]
+          val existingRec = cloudRecurring[updatedRecurringEntity.id]
+          if (existingTx != null && !existingTx.isDeleted) {
+            return com.example.data.sync.RecurringCloudClaimResult.AlreadyClaimed(existingTx, existingRec)
+          }
+          if (existingRec != null && (existingRec.isDeleted || existingRec.lastProcessedMonthYear == expectedCycleKey)) {
+            return com.example.data.sync.RecurringCloudClaimResult.AlreadyClaimed(existingTx, existingRec)
+          }
+          cloudTransactions[txEntity.id] = txEntity
+          cloudRecurring[updatedRecurringEntity.id] = updatedRecurringEntity
+          return com.example.data.sync.RecurringCloudClaimResult.Claimed
+        }
+      }
+    }
+
+    val rule = com.example.data.model.RecurringTransaction(
+      id = "rec-internet-1",
+      title = "IndiHome Fiber",
+      amount = 350_000.0,
+      type = com.example.data.model.TransactionType.EXPENSE,
+      category = "Bills & Fees",
+      accountName = "BCA",
+      dayOfMonth = 10,
+      frequency = "Setiap bulan",
+      isActive = true,
+      autoDeduct = true,
+      lastProcessedMonthYear = ""
+    )
+
+    val deviceA = com.example.data.repository.FinanceRepository()
+    deviceA.initContext(context)
+    deviceA.resetAllData(createDefaultWallet = false)
+    deviceA.addWallet(com.example.data.model.AccountWallet(id = "w-bca", name = "BCA", balance = 1_000_000.0))
+    deviceA.addRecurringTransaction(rule, checkImmediateProcess = false)
+    deviceA.setRecurringCloudGatewayForTests(sharedGateway)
+
+    val deviceB = com.example.data.repository.FinanceRepository()
+    deviceB.resetAllData(createDefaultWallet = false)
+    deviceB.addWallet(com.example.data.model.AccountWallet(id = "w-bca", name = "BCA", balance = 1_000_000.0))
+    deviceB.addRecurringTransaction(rule, checkImmediateProcess = false)
+    deviceB.setRecurringCloudGatewayForTests(sharedGateway)
+
+    val counts = kotlinx.coroutines.runBlocking {
+      val aDeferred = async(kotlinx.coroutines.Dispatchers.IO) {
+        deviceA.checkAndExecuteDueRecurringTransactionsSafely(15, 11, 2026)
+      }
+      val bDeferred = async(kotlinx.coroutines.Dispatchers.IO) {
+        deviceB.checkAndExecuteDueRecurringTransactionsSafely(15, 11, 2026)
+      }
+      aDeferred.await() to bDeferred.await()
+    }
+
+    // Strictly ONE device won the claim; the other device received AlreadyClaimed
+    assertEquals(1, counts.first + counts.second)
+    assertEquals(1, cloudTransactions.size)
+    org.junit.Assert.assertTrue(cloudTransactions.containsKey("recur_rec-internet-1_2026-11"))
+    assertEquals("11/2026", cloudRecurring["rec-internet-1"]?.lastProcessedMonthYear)
+
+    // Both devices now reflect the single occurrence & consistent lastProcessedMonthYear
+    assertEquals(1, deviceA.transactions.value.size)
+    assertEquals(1, deviceB.transactions.value.size)
+    assertEquals("recur_rec-internet-1_2026-11", deviceA.transactions.value.first().id)
+    assertEquals("recur_rec-internet-1_2026-11", deviceB.transactions.value.first().id)
+    assertEquals("11/2026", deviceA.recurringTransactions.value.first().lastProcessedMonthYear)
+    assertEquals("11/2026", deviceB.recurringTransactions.value.first().lastProcessedMonthYear)
+
+    // Winner wallet deducted once (650k), loser never mutated its local wallet prematurely (1M before wallet sync)
+    val winnerWallet = if (counts.first == 1) deviceA.wallets.value.first() else deviceB.wallets.value.first()
+    val loserWallet = if (counts.first == 1) deviceB.wallets.value.first() else deviceA.wallets.value.first()
+    assertEquals(650_000.0, winnerWallet.balance, 0.01)
+    assertEquals(1_000_000.0, loserWallet.balance, 0.01)
+  }
+
+  @Test
+  fun `device b defers recurring execution until initial google cloud sync completes`() {
+    var cloudSyncCompleted = false
+    val claimCalls = java.util.concurrent.atomic.AtomicInteger(0)
+
+    val delayedSyncGateway = object : com.example.data.sync.RecurringCloudGateway {
+      override fun isSignedInAndOnline(): Boolean = true
+      override fun hasCompletedInitialCloudSync(): Boolean = cloudSyncCompleted
+      override suspend fun tryClaimRecurringOccurrence(
+        txEntity: com.example.data.local.TransactionEntity,
+        updatedRecurringEntity: com.example.data.local.RecurringEntity,
+        expectedCycleKey: String
+      ): com.example.data.sync.RecurringCloudClaimResult {
+        claimCalls.incrementAndGet()
+        return com.example.data.sync.RecurringCloudClaimResult.Claimed
+      }
+    }
+
+    val deviceB = com.example.data.repository.FinanceRepository()
+    deviceB.resetAllData(createDefaultWallet = false)
+    deviceB.addWallet(com.example.data.model.AccountWallet(id = "w-bca", name = "BCA", balance = 1_000_000.0))
+    val staleLocalRule = com.example.data.model.RecurringTransaction(
+      id = "rec-pln-1",
+      title = "Token Listrik",
+      amount = 200_000.0,
+      type = com.example.data.model.TransactionType.EXPENSE,
+      category = "Bills & Fees",
+      accountName = "BCA",
+      dayOfMonth = 5,
+      frequency = "Setiap bulan",
+      isActive = true,
+      autoDeduct = true,
+      lastProcessedMonthYear = "" // Stale local state before sync
+    )
+    deviceB.addRecurringTransaction(staleLocalRule, checkImmediateProcess = false)
+    deviceB.setRecurringCloudGatewayForTests(delayedSyncGateway)
+
+    // Startup check runs BEFORE initial cloud sync finishes -> MUST defer and NOT create a local duplicate
+    val earlyExecuted = deviceB.checkAndExecuteDueRecurringTransactions(15, 11, 2026)
+    assertEquals(0, earlyExecuted)
+    assertEquals(0, claimCalls.get())
+    assertEquals(0, deviceB.transactions.value.size)
+    assertEquals(1_000_000.0, deviceB.wallets.value.first().balance, 0.01)
+
+    // Cloud sync pulls Device A's authoritative state showing 11/2026 was already processed
+    deviceB.updateRecurringTransaction(staleLocalRule.copy(lastProcessedMonthYear = "11/2026"))
+    cloudSyncCompleted = true
+
+    kotlinx.coroutines.runBlocking {
+      deviceB.handleCloudReconcileCompleted(overrideDay = 15, overrideMonth = 11, overrideYear = 2026)
+    }
+
+    // Even after cloud reconcile completes, 0 duplicate claims were issued
+    assertEquals(0, claimCalls.get())
+    assertEquals(0, deviceB.transactions.value.size)
+    assertEquals(1_000_000.0, deviceB.wallets.value.first().balance, 0.01)
+  }
+
+  @Test
+  fun `cleanupDuplicateRecurringTransactions removes legacy duplicates without touching manual transactions`() {
+    val repository = com.example.data.repository.FinanceRepository()
+    repository.resetAllData(createDefaultWallet = false)
+    repository.addWallet(com.example.data.model.AccountWallet(id = "w1", name = "BCA", balance = 1_000_000.0))
+
+    val rule = com.example.data.model.RecurringTransaction(
+      id = "rec-spotify",
+      title = "Spotify Family",
+      amount = 86_000.0,
+      type = com.example.data.model.TransactionType.EXPENSE,
+      category = "Entertainment",
+      accountName = "BCA",
+      dayOfMonth = 15,
+      frequency = "Setiap bulan",
+      lastProcessedMonthYear = "11/2026"
+    )
+    repository.addRecurringTransaction(rule, checkImmediateProcess = false)
+
+    // Legacy duplicate #1 & #2 from old random-UUID bug across 2 devices
+    val legacyAuto1 = com.example.data.model.Transaction(
+      id = "legacy-uuid-1",
+      title = "Spotify Family",
+      category = "Entertainment",
+      amount = 86_000.0,
+      type = com.example.data.model.TransactionType.EXPENSE,
+      accountName = "BCA",
+      dayOfMonth = 15,
+      monthIndex = 11,
+      year = 2026,
+      note = "Otomatis dari Transaksi Berulang",
+      recurrence = "Setiap bulan (Tgl 15)",
+      updatedAt = 1_000L
+    )
+    val legacyAuto2 = legacyAuto1.copy(
+      id = "legacy-uuid-2",
+      updatedAt = 2_000L
+    )
+    // Legitimate manual transaction on the exact same day/amount/category/wallet
+    val legitimateManual = com.example.data.model.Transaction(
+      id = "manual-uuid-1",
+      title = "Spotify Family",
+      category = "Entertainment",
+      amount = 86_000.0,
+      type = com.example.data.model.TransactionType.EXPENSE,
+      accountName = "BCA",
+      dayOfMonth = 15,
+      monthIndex = 11,
+      year = 2026,
+      note = "Bayar manual untuk teman",
+      recurrence = "Tidak pernah",
+      updatedAt = 3_000L
+    )
+
+    repository.addTransaction(legacyAuto1)
+    repository.addTransaction(legacyAuto2)
+    repository.addTransaction(legitimateManual)
+    assertEquals(3, repository.transactions.value.size)
+
+    val detected = repository.findDuplicateRecurringTransactions()
+    assertEquals(1, detected.size)
+    assertEquals("legacy-uuid-2", detected.first().duplicate.id)
+    assertEquals("legacy-uuid-1", detected.first().original.id)
+
+    // Safe cleanup adjusting double-deducted balance once
+    val removedCount = repository.cleanupDuplicateRecurringTransactions(adjustWalletBalance = true)
+    assertEquals(1, removedCount)
+
+    val remainingIds = repository.transactions.value.map { it.id }.toSet()
+    assertEquals(setOf("legacy-uuid-1", "manual-uuid-1"), remainingIds)
+    // Balance went 1_000_000 - (3 * 86_000) = 742_000, then +86_000 restored = 828_000 (2 valid tx retained)
+    assertEquals(828_000.0, repository.wallets.value.first().balance, 0.01)
+  }
+
+  @Test
+  fun `category color editing persists via repository room mapper and resolves globally`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repository = com.example.data.repository.FinanceRepository()
+    repository.initContext(context)
+
+    val foodCat = repository.categories.value.firstOrNull {
+      it.name.equals("Food & Dining", ignoreCase = true) && it.type == com.example.data.model.TransactionType.EXPENSE
+    } ?: com.example.data.model.MainCategory(
+      id = "cat-food-color-test",
+      name = "Food & Dining",
+      type = com.example.data.model.TransactionType.EXPENSE,
+      iconName = "Restaurant"
+    ).also { repository.addCategory(it) }
+
+    val customViolet = 0xFF8B5CF6L
+    repository.updateCategory(foodCat.copy(colorHex = customViolet))
+
+    val updatedCat = repository.categories.value.first { it.id == foodCat.id }
+    assertEquals(customViolet, updatedCat.colorHex)
+    assertEquals(
+      androidx.compose.ui.graphics.Color(customViolet),
+      com.example.util.CategoryIconHelper.resolveCategoryColor(updatedCat)
+    )
+    assertEquals(
+      androidx.compose.ui.graphics.Color(customViolet),
+      com.example.util.CategoryIconHelper.getCategoryColor("Food & Dining", com.example.data.model.TransactionType.EXPENSE)
+    )
+
+    // Verify Room Entity mapper preserves explicit custom color and treats legacy 0xFF3B82F6L as unset (0L)
+    val entity = com.example.data.local.RoomEntityMappers.run { updatedCat.toEntity() }
+    val restoredFromEntity = com.example.data.local.RoomEntityMappers.run { entity.toDomain() }
+    assertEquals(customViolet, restoredFromEntity.colorHex)
+
+    val legacyEntity = entity.copy(color = com.example.util.CategoryIconHelper.LEGACY_PLACEHOLDER_CATEGORY_COLOR)
+    val restoredLegacy = com.example.data.local.RoomEntityMappers.run { legacyEntity.toDomain() }
+    assertEquals(0L, restoredLegacy.colorHex)
+
+    // Resetting color back to 0L restores default auto color
+    repository.updateCategory(updatedCat.copy(colorHex = 0L))
+    assertEquals(
+      com.example.util.CategoryIconHelper.getDefaultCategoryColor("Food & Dining", com.example.data.model.TransactionType.EXPENSE),
+      com.example.util.CategoryIconHelper.getCategoryColor("Food & Dining", com.example.data.model.TransactionType.EXPENSE)
+    )
+  }
+
+  @Test
+  fun `transaction templates save rename reorder delete and backup round-trip correctly`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repository = com.example.data.repository.FinanceRepository()
+    repository.initContext(context)
+
+    val viewModel = com.example.ui.viewmodel.FinanceViewModel(repository)
+
+    val tpl1 = com.example.data.model.TransactionTemplate(
+      id = "tpl-kopi",
+      name = "Ngopi Pagi",
+      category = "Food & Dining",
+      subcategory = "Kopi & Kafe",
+      amount = 28_000.0,
+      rememberAmount = true,
+      type = com.example.data.model.TransactionType.EXPENSE,
+      accountName = "BCA",
+      note = "Es kopi susu",
+      label = "Harian, Jajan"
+    )
+    val tpl2 = com.example.data.model.TransactionTemplate(
+      id = "tpl-gaji",
+      name = "Gaji Bulanan",
+      category = "Salary",
+      amount = 0.0,
+      rememberAmount = false,
+      type = com.example.data.model.TransactionType.INCOME,
+      accountName = "BRI"
+    )
+
+    viewModel.saveTransactionTemplate(tpl1)
+    viewModel.saveTransactionTemplate(tpl2)
+    viewModel.setShowTemplatesAboveCategories(true)
+
+    assertEquals(2, repository.settings.value.transactionTemplates.size)
+    assertEquals(true, repository.settings.value.showTemplatesAboveCategories)
+
+    // Rename & Reorder
+    viewModel.renameTransactionTemplate("tpl-kopi", "Kopi Kantor")
+    viewModel.reorderTransactionTemplates(listOf(tpl2, tpl1.copy(name = "Kopi Kantor")))
+
+    val reordered = repository.settings.value.transactionTemplates
+    assertEquals("tpl-gaji", reordered[0].id)
+    assertEquals("tpl-kopi", reordered[1].id)
+    assertEquals("Kopi Kantor", reordered[1].name)
+
+    // Settings JSON mapper round-trip
+    val serializedSettings = com.example.data.local.RoomEntityMappers.serializeUserSettings(repository.settings.value)
+    val parsedSettings = com.example.data.local.RoomEntityMappers.parseUserSettings(serializedSettings)
+    assertEquals(true, parsedSettings.showTemplatesAboveCategories)
+    assertEquals(2, parsedSettings.transactionTemplates.size)
+    assertEquals("Kopi Kantor", parsedSettings.transactionTemplates[1].name)
+    assertEquals(false, parsedSettings.transactionTemplates[0].rememberAmount)
+
+    // Full JSON backup export & import round-trip
+    val backupJson = repository.exportTransactionsJson(context)
+    viewModel.deleteTransactionTemplate("tpl-kopi")
+    assertEquals(1, repository.settings.value.transactionTemplates.size)
+
+    val importResult = repository.importTransactionsFromJson(backupJson, replaceExisting = true)
+    org.junit.Assert.assertTrue(importResult.isSuccess)
+    assertEquals(2, repository.settings.value.transactionTemplates.size)
+    assertEquals(true, repository.settings.value.showTemplatesAboveCategories)
+  }
+
+  @Test
+  fun `backup and restore preserves edited category colors and templates in replace and merge modes`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val deviceA = com.example.data.repository.FinanceRepository()
+    deviceA.initContext(context)
+
+    val foodCatA = deviceA.categories.value.first {
+      it.name.equals("Food & Drink", ignoreCase = true) && it.type == com.example.data.model.TransactionType.EXPENSE
+    }
+    val customViolet = 0xFF8B5CF6L
+    deviceA.updateCategory(foodCatA.copy(colorHex = customViolet))
+
+    val customCatA = com.example.data.model.MainCategory(
+      id = "cat-custom-backup",
+      name = "Hobi Fotografi",
+      type = com.example.data.model.TransactionType.EXPENSE,
+      iconName = "Devices",
+      colorHex = 0xFFE11D48L
+    )
+    deviceA.addCategory(customCatA)
+
+    val tplA = com.example.data.model.TransactionTemplate(
+      id = "tpl-device-a",
+      name = "Kopi Susu",
+      category = "Food & Drink",
+      subcategory = "Cafe & Coffee",
+      amount = 25_000.0,
+      rememberAmount = true,
+      type = com.example.data.model.TransactionType.EXPENSE,
+      accountName = "BCA",
+      note = "Pagi"
+    )
+    deviceA.saveTransactionTemplate(tplA)
+    deviceA.setShowTemplatesAboveCategories(true)
+
+    val backupJson = deviceA.exportTransactionsJson(context)
+    org.junit.Assert.assertTrue(backupJson.contains("\"totalCustomCategoryColors\""))
+    org.junit.Assert.assertTrue(backupJson.contains("\"totalTemplates\""))
+    org.junit.Assert.assertTrue(backupJson.contains("Hobi Fotografi"))
+    org.junit.Assert.assertTrue(backupJson.contains("Kopi Susu"))
+
+    // 1. Restore on Device B using MERGE mode when Device B already has its own template & another category color
+    com.example.data.repository.FinanceRepository.clearSharedContextForTests()
+    com.example.data.local.AppDatabase.resetInstanceForTests()
+    context.deleteDatabase("money_tracker_room.db")
+    java.io.File(context.filesDir, "finance_database.json").delete()
+
+    val deviceB = com.example.data.repository.FinanceRepository()
+    deviceB.initContext(context)
+    val shoppingCatB = deviceB.categories.value.first {
+      it.name.equals("Shopping", ignoreCase = true) && it.type == com.example.data.model.TransactionType.EXPENSE
+    }
+    val customEmerald = 0xFF10B981L
+    deviceB.updateCategory(shoppingCatB.copy(colorHex = customEmerald))
+
+    val tplB = com.example.data.model.TransactionTemplate(
+      id = "tpl-device-b",
+      name = "Isi Bensin",
+      category = "Transport",
+      amount = 50_000.0,
+      rememberAmount = true,
+      type = com.example.data.model.TransactionType.EXPENSE,
+      accountName = "BRI"
+    )
+    deviceB.saveTransactionTemplate(tplB)
+
+    val mergeResult = deviceB.importTransactionsFromJson(backupJson, replaceExisting = false, ctx = context)
+    org.junit.Assert.assertTrue(mergeResult.isSuccess)
+    val mergeSummary = mergeResult.getOrThrow()
+    assertEquals(2, mergeSummary.customCategoryColorCount)
+    assertEquals(1, mergeSummary.templateCount)
+
+    // Both Device A's edited category colors AND Device B's local category color are preserved
+    val mergedFood = deviceB.categories.value.first {
+      it.name.equals("Food & Drink", ignoreCase = true) && it.type == com.example.data.model.TransactionType.EXPENSE
+    }
+    val mergedCustom = deviceB.categories.value.firstOrNull { it.id == customCatA.id }
+    val mergedShopping = deviceB.categories.value.first {
+      it.name.equals("Shopping", ignoreCase = true) && it.type == com.example.data.model.TransactionType.EXPENSE
+    }
+    assertEquals(customViolet, mergedFood.colorHex)
+    org.junit.Assert.assertNotNull(mergedCustom)
+    assertEquals(0xFFE11D48L, mergedCustom!!.colorHex)
+    assertEquals(customEmerald, mergedShopping.colorHex)
+    assertEquals(
+      androidx.compose.ui.graphics.Color(customViolet),
+      com.example.util.CategoryIconHelper.getCategoryColor("Food & Drink", com.example.data.model.TransactionType.EXPENSE)
+    )
+
+    // Both Device B's existing template and Device A's backed-up template are merged
+    val mergedTemplates = deviceB.settings.value.transactionTemplates
+    assertEquals(2, mergedTemplates.size)
+    org.junit.Assert.assertTrue(mergedTemplates.any { it.id == "tpl-device-b" && it.name == "Isi Bensin" })
+    org.junit.Assert.assertTrue(mergedTemplates.any { it.id == "tpl-device-a" && it.name == "Kopi Susu" })
+    org.junit.Assert.assertTrue(deviceB.settings.value.showTemplatesAboveCategories)
+
+    // 2. Restore using REPLACE mode replaces with exact backed-up colors and templates
+    val replaceResult = deviceB.importTransactionsFromJson(backupJson, replaceExisting = true, ctx = context)
+    org.junit.Assert.assertTrue(replaceResult.isSuccess)
+    val replaceSummary = replaceResult.getOrThrow()
+    assertEquals(2, replaceSummary.customCategoryColorCount)
+    assertEquals(1, replaceSummary.templateCount)
+    assertEquals(1, deviceB.settings.value.transactionTemplates.size)
+    assertEquals("tpl-device-a", deviceB.settings.value.transactionTemplates.first().id)
+    assertEquals(customViolet, deviceB.categories.value.first { it.id == foodCatA.id }.colorHex)
+    val replacedShopping = deviceB.categories.value.first {
+      it.name.equals("Shopping", ignoreCase = true) && it.type == com.example.data.model.TransactionType.EXPENSE
+    }
+    assertEquals(0L, replacedShopping.colorHex)
   }
 }

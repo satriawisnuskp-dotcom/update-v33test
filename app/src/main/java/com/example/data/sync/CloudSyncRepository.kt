@@ -63,12 +63,32 @@ sealed interface SyncStatus {
     data class Error(val message: String) : SyncStatus
 }
 
+sealed interface RecurringCloudClaimResult {
+    data object Claimed : RecurringCloudClaimResult
+    data class AlreadyClaimed(
+        val remoteTransaction: TransactionEntity? = null,
+        val remoteRecurring: RecurringEntity? = null
+    ) : RecurringCloudClaimResult
+    data object NotSignedInOrOffline : RecurringCloudClaimResult
+    data class Failed(val error: Throwable) : RecurringCloudClaimResult
+}
+
+interface RecurringCloudGateway {
+    fun isSignedInAndOnline(): Boolean
+    fun hasCompletedInitialCloudSync(): Boolean
+    suspend fun tryClaimRecurringOccurrence(
+        txEntity: TransactionEntity,
+        updatedRecurringEntity: RecurringEntity,
+        expectedCycleKey: String
+    ): RecurringCloudClaimResult
+}
+
 class CloudSyncRepository(
     private val firestore: FirebaseFirestore,
     private val database: AppDatabase,
     appContext: Context,
     private val auth: FirebaseAuth = Firebase.auth
-) {
+) : RecurringCloudGateway {
     constructor(context: Context, database: AppDatabase) : this(
         firestore = FirebaseFirestore.getInstance(
             context.applicationContext.getString(R.string.firestore_database_id)
@@ -100,6 +120,15 @@ class CloudSyncRepository(
 
     private val _currentUser = MutableStateFlow<FirebaseUser?>(auth.currentUser)
     val currentUser: StateFlow<FirebaseUser?> = _currentUser.asStateFlow()
+
+    private val _initialCloudSyncCompleted = MutableStateFlow(false)
+    val initialCloudSyncCompleted: StateFlow<Boolean> = _initialCloudSyncCompleted.asStateFlow()
+
+    @Volatile
+    var onCloudReconcileCompleted: (suspend (uid: String) -> Unit)? = null
+
+    @Volatile
+    var onCloudCollectionMerged: (suspend (collectionName: String) -> Unit)? = null
 
     private val authStateListener = FirebaseAuth.AuthStateListener { firebaseAuth ->
         val user = firebaseAuth.currentUser
@@ -176,6 +205,7 @@ class CloudSyncRepository(
 
     fun startSyncForUser(user: FirebaseUser) {
         if (activeSyncedUid == user.uid && listenerJobs.isNotEmpty()) return
+        _initialCloudSyncCompleted.value = false
         syncScope.launch {
             stopSync()
             activeSyncedUid = user.uid
@@ -194,6 +224,7 @@ class CloudSyncRepository(
             listenerJobs.forEach { it.cancel() }
             listenerJobs.clear()
             activeSyncedUid = null
+            _initialCloudSyncCompleted.value = false
         }
     }
 
@@ -517,6 +548,16 @@ class CloudSyncRepository(
             val syncedTime = System.currentTimeMillis()
             _lastSyncedAt.value = syncedTime
             _syncStatus.value = if (_isOnline.value) SyncStatus.Synced(syncedTime) else SyncStatus.Offline
+            _initialCloudSyncCompleted.value = true
+        }
+        if (auth.currentUser?.uid == user.uid) {
+            try {
+                onCloudReconcileCompleted?.invoke(user.uid)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Post-reconcile recurring check failed: ${e.message}")
+            }
         }
     }
 
@@ -816,6 +857,15 @@ class CloudSyncRepository(
                     }
                     if (winners.isNotEmpty()) {
                         upsertLocal(winners)
+                        if (collectionName == "transactions" || collectionName == "recurringTransactions") {
+                            try {
+                                onCloudCollectionMerged?.invoke(collectionName)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Post-merge hook failed for $collectionName: ${e.message}")
+                            }
+                        }
                     }
                     val ts = System.currentTimeMillis()
                     _lastSyncedAt.value = ts
@@ -825,6 +875,77 @@ class CloudSyncRepository(
                         SyncStatus.Synced(ts)
                     }
                 }
+        }
+    }
+
+    override fun isSignedInAndOnline(): Boolean = auth.currentUser != null && _isOnline.value
+
+    override fun hasCompletedInitialCloudSync(): Boolean = _initialCloudSyncCompleted.value
+
+    override suspend fun tryClaimRecurringOccurrence(
+        txEntity: TransactionEntity,
+        updatedRecurringEntity: RecurringEntity,
+        expectedCycleKey: String
+    ): RecurringCloudClaimResult {
+        val user = auth.currentUser ?: return RecurringCloudClaimResult.NotSignedInOrOffline
+        if (!_isOnline.value) return RecurringCloudClaimResult.NotSignedInOrOffline
+        val uid = user.uid
+        val safeTxId = RoomEntityMappers.sanitizeFirestoreId(txEntity.id)
+        val safeRecId = RoomEntityMappers.sanitizeFirestoreId(updatedRecurringEntity.id)
+
+        return try {
+            val txRef = firestore.collection("users").document(uid)
+                .collection("transactions").document(safeTxId)
+            val recRef = firestore.collection("users").document(uid)
+                .collection("recurringTransactions").document(safeRecId)
+
+            val claimResult = firestore.runTransaction { transaction ->
+                val txSnap = transaction.get(txRef)
+                val recSnap = transaction.get(recRef)
+
+                val remoteTx = if (txSnap.exists()) parseTransactionDocument(txSnap) else null
+                val remoteRec = if (recSnap.exists()) parseRecurringDocument(recSnap) else null
+
+                if (remoteTx != null && !remoteTx.isDeleted) {
+                    return@runTransaction RecurringCloudClaimResult.AlreadyClaimed(remoteTx, remoteRec)
+                }
+                if (remoteRec != null && (remoteRec.isDeleted ||
+                        (!RoomEntityMappers.isDailyOrWeeklyFrequency(remoteRec.frequency) &&
+                            remoteRec.lastProcessedMonthYear == expectedCycleKey))
+                ) {
+                    return@runTransaction RecurringCloudClaimResult.AlreadyClaimed(remoteTx, remoteRec)
+                }
+
+                transaction.set(txRef, transactionToMap(txEntity), SetOptions.merge())
+                transaction.set(recRef, recurringToMap(updatedRecurringEntity), SetOptions.merge())
+                RecurringCloudClaimResult.Claimed
+            }.await()
+
+            when (claimResult) {
+                is RecurringCloudClaimResult.AlreadyClaimed -> {
+                    claimResult.remoteTransaction?.let { database.transactionDao().upsert(it) }
+                    claimResult.remoteRecurring?.let { database.recurringDao().upsert(it) }
+                }
+                is RecurringCloudClaimResult.Claimed -> {
+                    val ts = System.currentTimeMillis()
+                    _lastSyncedAt.value = ts
+                    _syncStatus.value = if (_isOnline.value) SyncStatus.Synced(ts) else SyncStatus.Offline
+                }
+                else -> {}
+            }
+            claimResult
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val firestoreEx = generateSequence(e as Throwable?) { it.cause }
+                .filterIsInstance<FirebaseFirestoreException>()
+                .firstOrNull()
+            if (firestoreEx?.code == FirebaseFirestoreException.Code.UNAVAILABLE || !_isOnline.value) {
+                RecurringCloudClaimResult.NotSignedInOrOffline
+            } else {
+                handleFirestoreError(e, OperationType.WRITE, "users/$uid/transactions/$safeTxId")
+                RecurringCloudClaimResult.Failed(e)
+            }
         }
     }
 
@@ -1604,5 +1725,6 @@ class CloudSyncRepository(
         auth.removeAuthStateListener(authStateListener)
         listenerJobs.forEach { it.cancel() }
         listenerJobs.clear()
+        _initialCloudSyncCompleted.value = false
     }
 }

@@ -91,6 +91,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.filled.EventRepeat
 import com.example.data.model.Transaction
 import com.example.data.model.TransactionType
+import com.example.ui.dialogs.AddTransactionDialog
 import com.example.ui.dialogs.BatchLabelDialog
 import com.example.ui.dialogs.CategoryPickerSubDialog
 import com.example.ui.dialogs.ConfirmDeleteTransactionsDialog
@@ -159,6 +160,7 @@ fun TransactionScreen(
     var isSelectionMode by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf(setOf<String>()) }
     var editingTransaction by remember { mutableStateOf<Transaction?>(null) }
+    var copiedTransactionDraft by remember { mutableStateOf<Transaction?>(null) }
 
     var showBatchCategoryDialog by remember { mutableStateOf(false) }
     var showBatchLabelDialog by remember { mutableStateOf(false) }
@@ -1264,7 +1266,33 @@ fun TransactionScreen(
         EditTransactionDialog(
             transaction = tx,
             viewModel = viewModel,
+            onCopyTransaction = { draft ->
+                editingTransaction = null
+                copiedTransactionDraft = draft
+            },
             onDismiss = { editingTransaction = null }
+        )
+    }
+
+    copiedTransactionDraft?.let { draft ->
+        AddTransactionDialog(
+            viewModel = viewModel,
+            initialCategory = draft.category,
+            initialWallet = draft.accountName,
+            initialToWallet = draft.toAccountName.takeIf { it.isNotBlank() },
+            initialLabel = draft.label,
+            initialAmount = draft.amount,
+            initialNote = draft.note,
+            initialSubcategory = draft.subcategory,
+            initialRecurrence = draft.recurrence.ifBlank { "Tidak pernah" },
+            initialTransferFee = draft.transferFee,
+            initialTargetAssetId = draft.targetAssetId,
+            initialTargetAssetName = draft.targetAssetName,
+            initialTargetDebtId = draft.targetDebtId,
+            initialTargetDebtName = draft.targetDebtName,
+            initialType = draft.type,
+            isCopyMode = true,
+            onDismiss = { copiedTransactionDraft = null }
         )
     }
 

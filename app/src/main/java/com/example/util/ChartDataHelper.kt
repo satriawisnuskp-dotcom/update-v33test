@@ -950,21 +950,69 @@ object ChartDataHelper {
         return c.timeInMillis
     }
 
+    private fun isExternalTransferTarget(tx: Transaction): Boolean {
+        return tx.targetAssetId.isNotBlank() ||
+            tx.targetAssetName.isNotBlank() ||
+            tx.targetDebtId.isNotBlank() ||
+            tx.targetDebtName.isNotBlank() ||
+            tx.category.equals("Asset", ignoreCase = true) ||
+            tx.category.equals("Aset", ignoreCase = true) ||
+            tx.category.equals("Transfer Aset", ignoreCase = true) ||
+            tx.category.equals("Pembayaran Utang", ignoreCase = true) ||
+            tx.category.equals("Bayar Utang", ignoreCase = true) ||
+            tx.toAccountName.isBlank()
+    }
+
+    private fun Calendar.setSafeDate(year: Int, monthOneBased: Int, dayOfMonth: Int) {
+        set(Calendar.DAY_OF_MONTH, 1)
+        set(Calendar.YEAR, year)
+        set(Calendar.MONTH, (monthOneBased - 1).coerceIn(0, 11))
+        val maxDay = getActualMaximum(Calendar.DAY_OF_MONTH)
+        set(Calendar.DAY_OF_MONTH, dayOfMonth.coerceIn(1, maxDay))
+    }
+
     fun generateFinancialPoints(
         timeframe: String,
         transactions: List<Transaction>,
         currentBalance: Double,
         walletFilter: String = "Semua",
         isDebt: Boolean = false,
-        allowNegative: Boolean = false
+        allowNegative: Boolean = false,
+        wallets: List<AccountWallet>? = null
     ): List<FinancialDataPoint> {
+        val sanitizedTxs = transactions.map { TransactionMathHelper.sanitizeTransaction(it) }
+        val activeWalletNames = wallets
+            ?.mapNotNull { it.name.trim().lowercase().takeIf(String::isNotBlank) }
+            ?.toSet()
+
+        val relevantTxs = if (walletFilter == "Semua") {
+            if (activeWalletNames == null) {
+                sanitizedTxs
+            } else {
+                sanitizedTxs.filter { tx ->
+                    val srcMatch = tx.accountName.trim().lowercase() in activeWalletNames
+                    val destMatch = tx.type == TransactionType.TRANSFER &&
+                        !isExternalTransferTarget(tx) &&
+                        tx.toAccountName.trim().lowercase() in activeWalletNames
+                    srcMatch || destMatch
+                }
+            }
+        } else {
+            val targetWallet = walletFilter.trim()
+            sanitizedTxs.filter { tx ->
+                tx.accountName.trim().equals(targetWallet, ignoreCase = true) ||
+                    (tx.type == TransactionType.TRANSFER &&
+                        !isExternalTransferTarget(tx) &&
+                        tx.toAccountName.trim().equals(targetWallet, ignoreCase = true))
+            }
+        }
+
+        val txsForRange = relevantTxs.ifEmpty { sanitizedTxs }
         val now = Calendar.getInstance()
-        val latestTx = transactions.maxByOrNull { it.year * 10000 + it.monthIndex * 100 + it.dayOfMonth }
+        val latestTx = txsForRange.maxByOrNull { it.year * 10000 + it.monthIndex * 100 + it.dayOfMonth }
         val anchor = Calendar.getInstance().apply {
             if (latestTx != null) {
-                set(Calendar.YEAR, latestTx.year)
-                set(Calendar.MONTH, (latestTx.monthIndex - 1).coerceIn(0, 11))
-                set(Calendar.DAY_OF_MONTH, latestTx.dayOfMonth.coerceIn(1, 31))
+                setSafeDate(latestTx.year, latestTx.monthIndex, latestTx.dayOfMonth)
                 if (timeInMillis < now.timeInMillis) {
                     timeInMillis = now.timeInMillis
                 }
@@ -986,26 +1034,14 @@ object ChartDataHelper {
             "1M" -> (29 downTo 0).toList()
             "3M" -> (89 downTo 0).toList()
             "YTD" -> {
-                val anchorYear = anchor.get(Calendar.YEAR)
-                val startYearCal = Calendar.getInstance().apply {
-                    set(Calendar.YEAR, anchorYear)
-                    set(Calendar.MONTH, Calendar.JANUARY)
-                    set(Calendar.DAY_OF_MONTH, 1)
-                    set(Calendar.HOUR_OF_DAY, 23)
-                    set(Calendar.MINUTE, 59)
-                    set(Calendar.SECOND, 59)
-                    set(Calendar.MILLISECOND, 999)
-                }
-                val daysDiff = ((anchor.timeInMillis - startYearCal.timeInMillis) / 86400000L).toInt().coerceAtLeast(0)
+                val daysDiff = (anchor.get(Calendar.DAY_OF_YEAR) - 1).coerceAtLeast(0)
                 (daysDiff downTo 0).toList()
             }
             else -> { // "ALL"
-                val earliestTx = transactions.minByOrNull { it.year * 10000 + it.monthIndex * 100 + it.dayOfMonth }
+                val earliestTx = txsForRange.minByOrNull { it.year * 10000 + it.monthIndex * 100 + it.dayOfMonth }
                 val startCal = Calendar.getInstance().apply {
                     if (earliestTx != null) {
-                        set(Calendar.YEAR, earliestTx.year)
-                        set(Calendar.MONTH, (earliestTx.monthIndex - 1).coerceIn(0, 11))
-                        set(Calendar.DAY_OF_MONTH, earliestTx.dayOfMonth.coerceIn(1, 31))
+                        setSafeDate(earliestTx.year, earliestTx.monthIndex, earliestTx.dayOfMonth)
                     } else {
                         timeInMillis = anchor.timeInMillis
                         add(Calendar.MONTH, -6)
@@ -1015,7 +1051,9 @@ object ChartDataHelper {
                     set(Calendar.SECOND, 59)
                     set(Calendar.MILLISECOND, 999)
                 }
-                val totalDays = ((anchor.timeInMillis - startCal.timeInMillis) / 86400000L).toInt().coerceIn(6, 365)
+                val totalDays = ((anchor.timeInMillis - startCal.timeInMillis + 43200000L) / 86400000L)
+                    .toInt()
+                    .coerceIn(6, 365)
                 (totalDays downTo 0).toList()
             }
         }
@@ -1037,29 +1075,35 @@ object ChartDataHelper {
             shortLabels.add(sdfShort.format(dateObj))
         }
 
-        val relevantTxs = if (walletFilter == "Semua") {
-            transactions
-        } else {
-            transactions.filter { tx ->
-                tx.accountName.equals(walletFilter, ignoreCase = true) ||
-                (tx.type == TransactionType.TRANSFER && tx.toAccountName.equals(walletFilter, ignoreCase = true))
-            }
-        }
-
         fun getTxNetCashflow(tx: Transaction): Double {
             return if (walletFilter == "Semua") {
+                val sourceMatches = activeWalletNames == null ||
+                    tx.accountName.trim().lowercase() in activeWalletNames
                 when (tx.type) {
-                    TransactionType.INCOME -> tx.amount
-                    TransactionType.EXPENSE -> -tx.amount
-                    TransactionType.TRANSFER -> -tx.transferFee
+                    TransactionType.INCOME -> if (sourceMatches) tx.amount else 0.0
+                    TransactionType.EXPENSE -> if (sourceMatches) -tx.amount else 0.0
+                    TransactionType.TRANSFER -> {
+                        val outflow = if (sourceMatches) -(tx.amount + tx.transferFee) else 0.0
+                        val destMatches = !isExternalTransferTarget(tx) &&
+                            (activeWalletNames == null || tx.toAccountName.trim().lowercase() in activeWalletNames)
+                        val inflow = if (destMatches) tx.amount else 0.0
+                        outflow + inflow
+                    }
                 }
             } else {
-                when {
-                    tx.type == TransactionType.INCOME -> tx.amount
-                    tx.type == TransactionType.EXPENSE -> -tx.amount
-                    tx.type == TransactionType.TRANSFER && tx.toAccountName.equals(walletFilter, ignoreCase = true) -> tx.amount
-                    tx.type == TransactionType.TRANSFER && tx.accountName.equals(walletFilter, ignoreCase = true) -> -(tx.amount + tx.transferFee)
-                    else -> 0.0
+                val targetWallet = walletFilter.trim()
+                val isSource = tx.accountName.trim().equals(targetWallet, ignoreCase = true)
+                val isDest = tx.type == TransactionType.TRANSFER &&
+                    !isExternalTransferTarget(tx) &&
+                    tx.toAccountName.trim().equals(targetWallet, ignoreCase = true)
+                when (tx.type) {
+                    TransactionType.INCOME -> if (isSource) tx.amount else 0.0
+                    TransactionType.EXPENSE -> if (isSource) -tx.amount else 0.0
+                    TransactionType.TRANSFER -> {
+                        val outflow = if (isSource) -(tx.amount + tx.transferFee) else 0.0
+                        val inflow = if (isDest) tx.amount else 0.0
+                        outflow + inflow
+                    }
                 }
             }
         }
@@ -1089,10 +1133,12 @@ object ChartDataHelper {
         val startVal = rawBalances.firstOrNull() ?: currentBalance
         return rawBalances.mapIndexed { index, bal ->
             val delta = bal - startVal
-            val pct = if (startVal > 0.0) {
-                (delta / startVal) * 100.0
+            val pct = if (startVal != 0.0) {
+                (delta / kotlin.math.abs(startVal)) * 100.0
             } else if (bal > 0.0) {
                 100.0
+            } else if (bal < 0.0) {
+                -100.0
             } else {
                 0.0
             }
@@ -1112,7 +1158,9 @@ object ChartDataHelper {
         transactions: List<Transaction>,
         currentBalance: Double,
         walletFilter: String = "Semua",
-        isDebt: Boolean = false
+        isDebt: Boolean = false,
+        allowNegative: Boolean = false,
+        wallets: List<AccountWallet>? = null
     ): Map<String, List<FinancialDataPoint>> {
         return listOf("7D", "1M", "3M", "YTD", "ALL").associateWith { tf ->
             generateFinancialPoints(
@@ -1120,7 +1168,9 @@ object ChartDataHelper {
                 transactions = transactions,
                 currentBalance = currentBalance,
                 walletFilter = walletFilter,
-                isDebt = isDebt
+                isDebt = isDebt,
+                allowNegative = allowNegative,
+                wallets = wallets
             )
         }
     }
@@ -1152,7 +1202,8 @@ object ChartDataHelper {
                 currentBalance = totalWalletBal,
                 walletFilter = "Semua",
                 isDebt = false,
-                allowNegative = true
+                allowNegative = true,
+                wallets = wallets
             )
 
             val rawNetWorthList = walletPoints.map { pt ->

@@ -73,6 +73,7 @@ import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.DarkSurfaceElevated
 import com.example.ui.theme.ExpenseRed
 import com.example.ui.theme.IncomeGreen
+import com.example.data.model.AccountWallet
 import com.example.data.model.Transaction
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextSubtle
@@ -586,6 +587,8 @@ fun InteractiveFinancialChartCard(
     modifier: Modifier = Modifier,
     customPointsMap: Map<String, List<FinancialDataPoint>>? = null,
     transactions: List<Transaction> = emptyList(),
+    wallets: List<AccountWallet>? = null,
+    allowNegative: Boolean = false,
     isDebtChart: Boolean = false,
     lineColor: Color? = null,
     externalIsBalanceHidden: Boolean? = null,
@@ -599,7 +602,7 @@ fun InteractiveFinancialChartCard(
     val periods = listOf("7D", "1M", "3M", "YTD", "ALL")
 
     // Active dataset for selected period
-    val activePoints = remember(selectedPeriod, currentBalance, customPointsMap, transactions, isDebtChart) {
+    val activePoints = remember(selectedPeriod, currentBalance, customPointsMap, transactions, wallets, allowNegative, isDebtChart) {
         val mapped = customPointsMap?.get(selectedPeriod)
         if (!mapped.isNullOrEmpty()) {
             mapped
@@ -608,12 +611,14 @@ fun InteractiveFinancialChartCard(
                 timeframe = selectedPeriod,
                 transactions = transactions,
                 currentBalance = currentBalance,
-                isDebt = isDebtChart
+                isDebt = isDebtChart,
+                allowNegative = allowNegative,
+                wallets = wallets
             )
         } else if (isDebtChart) {
             ChartDataHelper.generateAllTimeframePoints(emptyList(), currentBalance, isDebt = true)[selectedPeriod] ?: emptyList()
         } else {
-            ChartDataHelper.generateAllTimeframePoints(emptyList(), currentBalance)[selectedPeriod] ?: emptyList()
+            ChartDataHelper.generateAllTimeframePoints(emptyList(), currentBalance, allowNegative = allowNegative, wallets = wallets)[selectedPeriod] ?: emptyList()
         }
     }
 
